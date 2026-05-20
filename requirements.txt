@@ -14,3 +14,5 @@ mujoco
 msgpack
 msgpack-numpy
 colorlog
+hydra-core
+omegaconf

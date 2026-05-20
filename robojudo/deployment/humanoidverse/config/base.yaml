@@ -1,0 +1,54 @@
+defaults:
+  - _self_
+
+runtime:
+  backend: dummy
+  model_path: null
+  providers:
+    - CPUExecutionProvider
+  input_name: actor_obs
+  output_name: action
+  policy_input_key: policy_input
+  action_dim: 12
+
+eval:
+  steps: 5
+  seed: 0
+
+obs:
+  clip: 100.0
+  terms:
+    base_ang_vel:
+      dim: 3
+      scale: 0.25
+    projected_gravity:
+      dim: 3
+      scale: 1.0
+    command:
+      dim: 3
+      scale: 1.0
+    dof_pos:
+      dim: 12
+      scale: 1.0
+    dof_vel:
+      dim: 12
+      scale: 0.05
+    last_action:
+      dim: 12
+      scale: 1.0
+  groups:
+    actor_obs:
+      - base_ang_vel
+      - projected_gravity
+      - command
+      - dof_pos
+      - dof_vel
+      - last_action
+  history:
+    actor_history:
+      source: actor_obs
+      steps: 4
+  outputs:
+    policy_input:
+      - actor_obs
+      - actor_history
