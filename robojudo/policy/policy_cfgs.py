@@ -1,6 +1,6 @@
 from pydantic import field_validator, model_validator
 
-from robojudo.config import ASSETS_DIR, Config
+from robojudo.config import ASSETS_DIR, ROOT_DIR, Config
 from robojudo.tools.tool_cfgs import DoFConfig
 
 
@@ -427,3 +427,29 @@ class TwistPolicyCfg(PolicyCfg):
     @property
     def mimic_obs_other_ids(self) -> list[int]:
         return [f for f in range(self.mimic_obs_total_degrees) if f not in self.mimic_obs_wrist_ids]
+
+
+class HumanoidVersePolicyCfg(PolicyCfg):
+    policy_type: str = "HumanoidVersePolicy"
+    disable_autoload: bool = True
+
+    runtime_backend: str = "dummy"
+    model_path: str | None = None
+    template_cfg: str = (ROOT_DIR / "robojudo/deployment/humanoidverse/config/base.yaml").as_posix()
+    hydra_overrides: list[str] = []
+
+    policy_input_key: str = "actor_obs"
+    onnx_input_name: str = "actor_obs"
+    onnx_output_name: str = "action"
+
+    commands_map: list[list[float]] = [
+        [-1.0, 0.0, 1.0],
+        [1.0, 0.0, -1.0],
+        [1.0, 0.0, -1.0],
+    ]
+
+    @property
+    def policy_file(self) -> str:
+        if self.model_path is None:
+            return ""
+        return self.model_path
