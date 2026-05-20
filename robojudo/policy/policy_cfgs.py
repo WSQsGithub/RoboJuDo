@@ -439,8 +439,11 @@ class HumanoidVersePolicyCfg(PolicyCfg):
     hydra_overrides: list[str] = []
 
     policy_input_key: str = "actor_obs"
+    policy_input_keys: list[str] | None = None
     onnx_input_name: str = "actor_obs"
+    onnx_input_names: list[str] | None = None
     onnx_output_name: str = "action"
+    input_shapes: dict[str, list[int]] | None = None
 
     commands_map: list[list[float]] = [
         [-1.0, 0.0, 1.0],

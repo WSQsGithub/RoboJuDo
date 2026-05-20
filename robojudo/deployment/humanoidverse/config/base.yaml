@@ -7,8 +7,11 @@ runtime:
   providers:
     - CPUExecutionProvider
   input_name: actor_obs
+  input_names: []
   output_name: action
   policy_input_key: policy_input
+  policy_input_keys: []
+  input_shapes: {}
   action_dim: 12
 
 eval:

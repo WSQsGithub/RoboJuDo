@@ -14,11 +14,18 @@ class HumanoidVerseDeployer:
         self.cfg = self._normalize_config(cfg)
         self.obs_packer = AutoObsPacker(self.cfg.obs)
         self._policy_input_key = str(self.cfg.runtime.get("policy_input_key", "policy_input"))
+        self._policy_input_keys = [str(x) for x in self.cfg.runtime.get("policy_input_keys", [])]
         self._action_dim = int(self.cfg.runtime.action_dim)
         self._backend = str(self.cfg.runtime.backend)
+        self._input_name = str(self.cfg.runtime.get("input_name", self._policy_input_key))
+        self._input_names = [str(x) for x in self.cfg.runtime.get("input_names", [])]
+        self._input_shapes = {
+            str(key): [int(v) for v in value]
+            for key, value in self.cfg.runtime.get("input_shapes", {}).items()
+        }
 
         self._session = None
-        self._onnx_input_name = None
+        self._onnx_input_names: list[str] = []
         self._onnx_output_name = None
         self._torch_model = None
 
@@ -84,8 +91,11 @@ class HumanoidVerseDeployer:
                 "model_path": cfg.get("runtime", {}).get("model_path", None),
                 "providers": cfg.get("runtime", {}).get("providers", ["CPUExecutionProvider"]),
                 "input_name": cfg.get("runtime", {}).get("input_name", output_key),
+                "input_names": cfg.get("runtime", {}).get("input_names", []),
+                "input_shapes": cfg.get("runtime", {}).get("input_shapes", {}),
                 "output_name": cfg.get("runtime", {}).get("output_name", "action"),
                 "policy_input_key": output_key,
+                "policy_input_keys": cfg.get("runtime", {}).get("policy_input_keys", []),
                 "action_dim": action_dim if action_dim is not None else 0,
             },
             "obs": {
@@ -116,7 +126,7 @@ class HumanoidVerseDeployer:
             self._session = ort.InferenceSession(
                 str(model_path), providers=list(self.cfg.runtime.get("providers", ["CPUExecutionProvider"]))
             )
-            self._onnx_input_name = str(self.cfg.runtime.get("input_name", self._session.get_inputs()[0].name))
+            self._onnx_input_names = [inp.name for inp in self._session.get_inputs()]
             self._onnx_output_name = str(self.cfg.runtime.get("output_name", self._session.get_outputs()[0].name))
             return
 
@@ -129,20 +139,82 @@ class HumanoidVerseDeployer:
 
         raise ValueError(f"unsupported runtime backend '{self._backend}'")
 
-    def infer(self, obs_vec: np.ndarray) -> np.ndarray:
+    def _resolve_policy_input_keys(self, packed: dict[str, np.ndarray]) -> list[str]:
+        if self._policy_input_keys:
+            missing = [key for key in self._policy_input_keys if key not in packed]
+            if missing:
+                raise KeyError(f"Configured policy_input_keys missing from packed outputs: {missing}")
+            return list(self._policy_input_keys)
+
+        if self._policy_input_key in packed:
+            return [self._policy_input_key]
+
+        actor_like = [key for key in packed.keys() if key.startswith("actor_obs")]
+        if actor_like:
+            actor_like.sort(key=lambda x: (x != "actor_obs", x))
+            return actor_like
+
+        if len(packed) == 1:
+            return [next(iter(packed.keys()))]
+
+        raise KeyError(
+            f"policy input key '{self._policy_input_key}' not found in packed outputs: {list(packed.keys())}"
+        )
+
+    def _reshape_input_if_needed(self, input_key: str, obs_vec: np.ndarray) -> np.ndarray:
+        if input_key in self._input_shapes:
+            target_shape = tuple(self._input_shapes[input_key])
+            return obs_vec.reshape(target_shape)
+        return obs_vec
+
+    def infer(self, obs_inputs: dict[str, np.ndarray]) -> np.ndarray:
         if self._backend == "dummy":
             return np.zeros((self._action_dim,), dtype=np.float32)
 
         if self._backend == "onnx":
             assert self._session is not None
-            assert self._onnx_input_name is not None
             assert self._onnx_output_name is not None
-            obs_batch = np.expand_dims(obs_vec.astype(np.float32, copy=False), axis=0)
-            outputs = self._session.run([self._onnx_output_name], {self._onnx_input_name: obs_batch})
+
+            input_keys = list(obs_inputs.keys())
+            if self._input_names:
+                onnx_names = list(self._input_names)
+            elif len(input_keys) == 1:
+                onnx_names = [self._input_name]
+            elif all(key in self._onnx_input_names for key in input_keys):
+                onnx_names = input_keys
+            else:
+                if len(input_keys) != len(self._onnx_input_names):
+                    raise ValueError(
+                        f"Cannot map inputs automatically: obs_keys={input_keys}, onnx_inputs={self._onnx_input_names}. "
+                        "Please set runtime.input_names and runtime.policy_input_keys explicitly."
+                    )
+                onnx_names = list(self._onnx_input_names)
+
+            if len(onnx_names) != len(input_keys):
+                raise ValueError(
+                    f"Input mapping mismatch: input_keys={input_keys}, onnx_names={onnx_names}."
+                )
+
+            feed_dict: dict[str, np.ndarray] = {}
+            for onnx_name, input_key in zip(onnx_names, input_keys, strict=True):
+                obs_vec = obs_inputs[input_key].astype(np.float32, copy=False)
+                obs_vec = self._reshape_input_if_needed(input_key, obs_vec)
+                feed_dict[onnx_name] = np.expand_dims(obs_vec, axis=0)
+
+            outputs = self._session.run([self._onnx_output_name], feed_dict)
             return np.asarray(outputs[0], dtype=np.float32).reshape(-1)
 
         assert self._torch_model is not None
         import torch
+
+        if len(obs_inputs) != 1:
+            raise ValueError("torchscript backend currently supports single policy input only")
+
+        input_key = next(iter(obs_inputs.keys()))
+        obs_vec = self._reshape_input_if_needed(input_key, obs_inputs[input_key])
+
+        if np.asarray(obs_vec).ndim != 1:
+            raise ValueError("torchscript backend expects 1D input vector; consider using onnx backend for multi/head inputs")
 
         obs_tensor = torch.from_numpy(obs_vec.astype(np.float32, copy=False)).unsqueeze(0)
         with torch.inference_mode():
@@ -151,16 +223,10 @@ class HumanoidVerseDeployer:
 
     def step(self, raw_obs: dict[str, Any]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         packed = self.obs_packer.pack(raw_obs)
-        input_key = self._policy_input_key
-        if input_key not in packed:
-            if len(packed) == 1:
-                input_key = next(iter(packed.keys()))
-            else:
-                raise KeyError(
-                    f"policy input key '{self._policy_input_key}' not found in packed outputs: {list(packed.keys())}"
-                )
+        input_keys = self._resolve_policy_input_keys(packed)
+        input_obs = {key: packed[key] for key in input_keys}
 
-        action = self.infer(packed[input_key])
+        action = self.infer(input_obs)
         if action.shape[0] != self._action_dim:
             raise ValueError(f"action dim mismatch: expected {self._action_dim}, got {action.shape[0]}")
         return action, packed

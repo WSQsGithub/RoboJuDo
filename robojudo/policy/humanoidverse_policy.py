@@ -29,9 +29,7 @@ class HumanoidVersePolicy(Policy):
 
         overrides = [
             f"runtime.backend={self.cfg_policy.runtime_backend}",
-            f"runtime.policy_input_key={self.cfg_policy.policy_input_key}",
             f"runtime.action_dim={self.num_actions}",
-            f"runtime.input_name={self.cfg_policy.onnx_input_name}",
             f"runtime.output_name={self.cfg_policy.onnx_output_name}",
         ]
 
@@ -45,6 +43,16 @@ class HumanoidVersePolicy(Policy):
 
         with initialize_config_dir(version_base=None, config_dir=config_path.parent.as_posix()):
             cfg = compose(config_name=config_path.stem, overrides=overrides)
+
+        cfg.runtime.policy_input_key = self.cfg_policy.policy_input_key
+        cfg.runtime.input_name = self.cfg_policy.onnx_input_name
+
+        if self.cfg_policy.policy_input_keys is not None:
+            cfg.runtime.policy_input_keys = list(self.cfg_policy.policy_input_keys)
+        if self.cfg_policy.onnx_input_names is not None:
+            cfg.runtime.input_names = list(self.cfg_policy.onnx_input_names)
+        if self.cfg_policy.input_shapes is not None:
+            cfg.runtime.input_shapes = self.cfg_policy.input_shapes
 
         return OmegaConf.create(cfg)
 
