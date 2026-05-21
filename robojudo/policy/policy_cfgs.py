@@ -465,20 +465,27 @@ class VisualmimicPolicyCfg(PolicyCfg):
     disable_autoload: bool = True
     
     # Tracker model configuration (PyTorch)
-    tracker_model_name: str  # e.g., "twist_general_motion_tracker"
+    tracker_model_name: str = ""
+    tracker_model_path: str | None = None
     
     @property
     def tracker_model_file(self) -> str:
         """Path to tracker model file (PyTorch)."""
+        if self.tracker_model_path:
+            return self.tracker_model_path
         tracker_file = ASSETS_DIR / f"models/{self.robot}/twist/{self.tracker_model_name}.pt"
         return tracker_file.as_posix()
     
     # Generator model configuration (ONNX)
     generator_model_name: str = "pnp_generator"
+    generator_model_path: str | None = None
+    train_config_file: str | None = None
     
     @property
     def generator_model_file(self) -> str:
         """Path to generator model file (ONNX)."""
+        if self.generator_model_path:
+            return self.generator_model_path
         generator_file = ASSETS_DIR / f"models/{self.robot}/visualmimic/{self.generator_model_name}.onnx"
         return generator_file.as_posix()
     

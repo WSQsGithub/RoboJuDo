@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as rt
 import torch
+import yaml
 
 try:
     import cv2  # pyright: ignore[reportMissingImports]
@@ -90,11 +91,132 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
     cfg_policy: VisualmimicPolicyCfg
 
+    def _resolve_template_variable(self, var_str: str):
+        if not isinstance(var_str, str) or not var_str.startswith("${"):
+            return None
+        path = var_str[2:-1]
+        value = self.config
+        for part in path.split("."):
+            if isinstance(value, dict):
+                value = value.get(part)
+            else:
+                return None
+        return value
+
+    def _load_train_config(self) -> dict:
+        cfg_file = getattr(self.cfg_policy, "train_config_file", None)
+        if not cfg_file:
+            return {}
+        cfg_path = Path(cfg_file).expanduser()
+        if not cfg_path.exists():
+            logger.warning("Train config file not found: %s", cfg_path)
+            return {}
+        with open(cfg_path, "r") as f:
+            loaded = yaml.safe_load(f)
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _extract_obs_dims(self) -> dict[str, int]:
+        obs_cfg = self.config.get("obs", {}) if isinstance(self.config, dict) else {}
+        obs_dims_raw = obs_cfg.get("obs_dims", {})
+
+        obs_dims: dict[str, int] = {}
+        if isinstance(obs_dims_raw, dict):
+            src_items = obs_dims_raw.items()
+        elif isinstance(obs_dims_raw, list):
+            merged = {}
+            for item in obs_dims_raw:
+                if isinstance(item, dict):
+                    merged.update(item)
+            src_items = merged.items()
+        else:
+            src_items = []
+
+        for key, value in src_items:
+            resolved = value
+            if isinstance(value, str) and value.startswith("${"):
+                resolved = self._resolve_template_variable(value)
+            try:
+                obs_dims[key] = int(resolved)
+            except (TypeError, ValueError):
+                continue
+        return obs_dims
+
+    def _calc_actor_obs_dim(self) -> int:
+        total = 0
+        for key in self.actor_obs_config:
+            if key == "short_history":
+                total += sum(
+                    self.obs_dims.get(obs_key, 0) * int(frames)
+                    for obs_key, frames in self.short_history_config.items()
+                )
+            else:
+                total += self.obs_dims.get(key, 0)
+        return total
+
     def __init__(self, cfg_policy: VisualmimicPolicyCfg, device: str = "cpu"):
         # Initialize base Policy class first
         from robojudo.policy.base_policy import Policy
 
         Policy.__init__(self, cfg_policy=cfg_policy, device=device)
+
+        self.config = self._load_train_config()
+        obs_cfg = self.config.get("obs", {}) if isinstance(self.config, dict) else {}
+
+        self.obs_dict = obs_cfg.get("obs_dict", {}) if isinstance(obs_cfg.get("obs_dict", {}), dict) else {}
+        self.obs_auxiliary = (
+            obs_cfg.get("obs_auxiliary", {}) if isinstance(obs_cfg.get("obs_auxiliary", {}), dict) else {}
+        )
+        self.obs_dims = self._extract_obs_dims()
+        self.obs_scales = (
+            obs_cfg.get("obs_scales", {}) if isinstance(obs_cfg.get("obs_scales", {}), dict) else {}
+        )
+
+        self.actor_obs_config = list(self.obs_dict.get("actor_obs", []))
+        self.tracker_obs_config = list(self.obs_dict.get("tracker_obs", []))
+        self.short_history_config = dict(self.obs_auxiliary.get("short_history", {}))
+        self.long_history_config = dict(self.obs_auxiliary.get("long_history", {}))
+
+        if not self.actor_obs_config:
+            self.actor_obs_config = list(getattr(self.cfg_policy, "actor_obs_config", []))
+        if not self.tracker_obs_config:
+            self.tracker_obs_config = list(getattr(self.cfg_policy, "tracker_obs_config", []))
+        if not self.short_history_config:
+            self.short_history_config = dict(getattr(self.cfg_policy, "short_history_config", {}))
+        if not self.long_history_config:
+            self.long_history_config = dict(getattr(self.cfg_policy, "long_history_config", {}))
+        if not self.obs_dims:
+            self.obs_dims = dict(getattr(self.cfg_policy, "obs_dims", {}))
+        if not self.obs_scales:
+            self.obs_scales = dict(getattr(self.cfg_policy, "obs_scales", {}))
+
+        self.policy_input_keys = list(getattr(self.cfg_policy, "policy_input_keys", []) or [])
+        self.onnx_input_names = list(getattr(self.cfg_policy, "onnx_input_names", []) or [])
+
+        if not self.policy_input_keys:
+            if "actor_obs_2d" in self.obs_dict:
+                self.policy_input_keys = ["actor_obs_2d", "actor_obs"]
+            else:
+                self.policy_input_keys = ["actor_obs"]
+
+        if "generator_actions" in self.obs_dims:
+            self.cfg_policy.n_mimic_obs = int(self.obs_dims["generator_actions"])
+
+        if not self.cfg_policy.generator_default_actions:
+            default_actions = (
+                self.config.get("robot", {})
+                .get("control", {})
+                .get("generator", {})
+                .get("default_actions", [])
+            )
+            if isinstance(default_actions, list):
+                self.cfg_policy.generator_default_actions = [float(x) for x in default_actions]
+
+        self.cfg_policy.obs_dims = self.obs_dims
+        self.cfg_policy.obs_scales = self.obs_scales
+        self.cfg_policy.actor_obs_config = self.actor_obs_config
+        self.cfg_policy.tracker_obs_config = self.tracker_obs_config
+        self.cfg_policy.short_history_config = self.short_history_config
+        self.cfg_policy.long_history_config = self.long_history_config
 
         self.commands_map = cfg_policy.commands_map
 
@@ -117,24 +239,23 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         else:
             self._cached_generator_command = np.zeros(self.cfg_policy.n_mimic_obs, dtype=np.float32)
 
-        self.obs_scales = self.cfg_policy.obs_scales  # flat dict[str, float]
         self.ankle_idx = self.cfg_policy.ankle_idx
 
         history_config: dict[str, dict[str, int]] = {}
-        cfg_obs_aux = getattr(self.cfg_policy, "obs_auxiliary", None)
+        cfg_obs_aux = self.obs_auxiliary
         if isinstance(cfg_obs_aux, dict):
             for aux_key, aux_cfg in cfg_obs_aux.items():
                 if isinstance(aux_cfg, dict):
                     history_config[aux_key] = dict(aux_cfg)
-        if getattr(self.cfg_policy, "short_history_config", None):
-            history_config.setdefault("short_history", dict(self.cfg_policy.short_history_config))
-        if getattr(self.cfg_policy, "long_history_config", None):
-            history_config.setdefault("long_history", dict(self.cfg_policy.long_history_config))
+        if self.short_history_config:
+            history_config.setdefault("short_history", dict(self.short_history_config))
+        if self.long_history_config:
+            history_config.setdefault("long_history", dict(self.long_history_config))
         
         self.history_handler = HistoryHandler(
             num_envs=1,
             history_config=history_config,
-            obs_dims=self.cfg_policy.obs_dims,
+            obs_dims=self.obs_dims,
             device=torch.device(self.device),
             reversed=False
         )
@@ -177,8 +298,8 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             )
 
             # Get input and output names
-            self.generator_input_names = self.cfg_policy.onnx_input_names
-            if self.generator_input_names is None:
+            self.generator_input_names = self.onnx_input_names
+            if not self.generator_input_names:
                 self.generator_input_names = [
                     input.name for input in self.generator_session.get_inputs()
                 ]
@@ -210,8 +331,8 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             logger.debug(f"Generator action limits: [{self.generator_clip_action_limit_low[0]:.3f}, "
                         f"{self.generator_clip_action_limit_high[0]:.3f}]")
         else:
-            self.generator_action_mean = np.zeros(self.num_actions, dtype=np.float32)
-            self.generator_action_std = np.ones(self.num_actions, dtype=np.float32)
+            self.generator_action_mean = np.zeros(self.cfg_policy.n_mimic_obs, dtype=np.float32)
+            self.generator_action_std = np.ones(self.cfg_policy.n_mimic_obs, dtype=np.float32)
 
     def reset(self):
         """Reset policy state."""
@@ -322,41 +443,41 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         """Return latest generator command (31D, raw — scale applied by dispatcher)."""
         return self._cached_generator_command.copy()
 
-    def _get_obs_ee_pos_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("ee_pos_rel", 0), dtype=np.float32)
-    def _get_obs_ee_rot_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("ee_rot_rel", 0), dtype=np.float32)
-    def _get_obs_phase_one_hot(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("phase_one_hot", 0), dtype=np.float32)
-    def _get_obs_box_size(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_size", 0), dtype=np.float32)
-    def _get_obs_box_mass(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_mass", 0), dtype=np.float32)
-    def _get_obs_box_target_pos_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_target_pos_rel", 0), dtype=np.float32)
-    def _get_obs_box_pos_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_pos_rel", 0), dtype=np.float32)
-    def _get_obs_box_rot_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_rot_rel", 0), dtype=np.float32)
-    def _get_obs_box_yaw_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_yaw_rel", 0), dtype=np.float32)
-    def _get_obs_box_lin_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_lin_vel_rel", 0), dtype=np.float32)
-    def _get_obs_box_ang_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_ang_vel_rel", 0), dtype=np.float32)
-    def _get_obs_ee_lin_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("ee_lin_vel_rel", 0), dtype=np.float32)
-    def _get_obs_ee_ang_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("ee_ang_vel_rel", 0), dtype=np.float32)
-    def _get_obs_hand_contact_force(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("hand_contact_force", 0), dtype=np.float32)
+    def _get_obs_ee_pos_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("ee_pos_rel", 0), dtype=np.float32)
+    def _get_obs_ee_rot_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("ee_rot_rel", 0), dtype=np.float32)
+    def _get_obs_phase_one_hot(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("phase_one_hot", 0), dtype=np.float32)
+    def _get_obs_box_size(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("box_size", 0), dtype=np.float32)
+    def _get_obs_box_mass(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("box_mass", 0), dtype=np.float32)
+    def _get_obs_box_target_pos_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("box_target_pos_rel", 0), dtype=np.float32)
+    def _get_obs_box_pos_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("box_pos_rel", 0), dtype=np.float32)
+    def _get_obs_box_rot_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("box_rot_rel", 0), dtype=np.float32)
+    def _get_obs_box_yaw_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("box_yaw_rel", 0), dtype=np.float32)
+    def _get_obs_box_lin_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("box_lin_vel_rel", 0), dtype=np.float32)
+    def _get_obs_box_ang_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("box_ang_vel_rel", 0), dtype=np.float32)
+    def _get_obs_ee_lin_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("ee_lin_vel_rel", 0), dtype=np.float32)
+    def _get_obs_ee_ang_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("ee_ang_vel_rel", 0), dtype=np.float32)
+    def _get_obs_hand_contact_force(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("hand_contact_force", 0), dtype=np.float32)
     def _get_obs_ego_cam(self, env_data, ctrl_data=None):
         return self._build_actor_obs_2d(env_data).flatten()
 
     def _compose_aux_history(self, aux_name: str) -> np.ndarray:
         aux_cfg = None
-        cfg_obs_aux = getattr(self.cfg_policy, "obs_auxiliary", None)
+        cfg_obs_aux = self.obs_auxiliary
         if isinstance(cfg_obs_aux, dict):
             aux_cfg = cfg_obs_aux.get(aux_name)
 
         if not isinstance(aux_cfg, dict):
             if aux_name == "short_history":
-                aux_cfg = getattr(self.cfg_policy, "short_history_config", {})
+                aux_cfg = self.short_history_config
             elif aux_name == "long_history":
-                aux_cfg = getattr(self.cfg_policy, "long_history_config", {})
+                aux_cfg = self.long_history_config
             else:
                 aux_cfg = {}
 
         parts: list[np.ndarray] = []
         for obs_key, repeat in aux_cfg.items():
             if obs_key not in self.history_handler.history:
-                dim = self.cfg_policy.obs_dims.get(obs_key, 0)
+                dim = self.obs_dims.get(obs_key, 0)
                 parts.append(np.zeros(dim * int(repeat), dtype=np.float32))
                 continue
             hist = self.history_handler.query(obs_key)[0]  # [frames, dim]
@@ -456,14 +577,14 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         # as well as dependencies for history.
         cfg = self.cfg_policy
 
-        obs_groups = getattr(cfg, "obs_dict", None)
+        obs_groups = self.obs_dict
         if not isinstance(obs_groups, dict) or len(obs_groups) == 0:
             obs_groups = {
-                "actor_obs": list(getattr(cfg, "actor_obs_config", [])),
-                "tracker_obs": list(getattr(cfg, "tracker_obs_config", [])),
+                "actor_obs": list(self.actor_obs_config),
+                "tracker_obs": list(self.tracker_obs_config),
             }
-            policy_input_keys = list(getattr(cfg, "policy_input_keys", []))
-            onnx_input_names = list(getattr(cfg, "onnx_input_names", []))
+            policy_input_keys = list(self.policy_input_keys)
+            onnx_input_names = list(self.onnx_input_names)
             if "actor_obs_2d" in policy_input_keys or "actor_obs_2d" in onnx_input_names:
                 obs_groups["actor_obs_2d"] = ["ego_cam"]
         
@@ -475,9 +596,9 @@ class VisualmimicPolicy(HumanoidVersePolicy):
                     if get_fn is not None:
                         obs = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32)
                     else:
-                        obs = np.zeros(cfg.obs_dims.get(key, 0), dtype=np.float32)
+                        obs = np.zeros(self.obs_dims.get(key, 0), dtype=np.float32)
                     # Apply scale
-                    obs_buf_dict[key] = obs * cfg.obs_scales.get(key, 1.0)
+                    obs_buf_dict[key] = obs * self.obs_scales.get(key, 1.0)
 
         # For tracker_proprio, it is built from parts:
         if "tracker_proprio" not in obs_buf_dict:
@@ -496,7 +617,7 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             if is_needed:
                 get_fn = getattr(self, f"_get_obs_{hist_key}", None)
                 if get_fn is not None:
-                    obs_buf_dict[hist_key] = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32) * cfg.obs_scales.get(hist_key, 1.0)
+                    obs_buf_dict[hist_key] = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32) * self.obs_scales.get(hist_key, 1.0)
         
         # 4. Construct groups
         actor_obs_2d = self._build_actor_obs_2d(env_data)  # We will manually fetch ego_cam if it's there
@@ -506,10 +627,10 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         else:
             actor_obs_2d = self._build_actor_obs_2d(env_data)
 
-        actor_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("actor_obs", cfg.actor_obs_config)], dtype=np.float32)
+        actor_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("actor_obs", self.actor_obs_config)], dtype=np.float32)
 
         # Optional length matching
-        expected = cfg.actor_obs_dim
+        expected = self._calc_actor_obs_dim()
         if len(actor_obs) != expected:
             if len(actor_obs) < expected:
                 actor_obs = np.concatenate([actor_obs, np.zeros(expected - len(actor_obs), dtype=np.float32)])
@@ -536,10 +657,10 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         # In training, generator_actions is added to history handler before!
         # But in deployment, generator_actions for CURRENT step is NOT computed until we run the generator!
         # So we used the PREVIOUS generator_command to push to history, and for `tracker_obs`, we substitute the `generator_actions` part with CURRENT generator_command.
-        obs_buf_dict["generator_actions"] = generator_command * cfg.obs_scales.get("generator_actions", 1.0)
+        obs_buf_dict["generator_actions"] = generator_command * self.obs_scales.get("generator_actions", 1.0)
 
         # Now construct tracker_obs
-        tracker_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("tracker_obs", cfg.tracker_obs_config)], dtype=np.float32)
+        tracker_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("tracker_obs", self.tracker_obs_config)], dtype=np.float32)
 
         # Run tracker
         try:
