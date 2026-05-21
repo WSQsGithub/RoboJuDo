@@ -653,12 +653,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         generator_command = self._post_process_generator_command(generator_command)
         self._cached_generator_command = generator_command
 
-        # We must re-add generator_command to history and build tracker_obs? Wait.
-        # In training, generator_actions is added to history handler before!
-        # But in deployment, generator_actions for CURRENT step is NOT computed until we run the generator!
-        # So we used the PREVIOUS generator_command to push to history, and for `tracker_obs`, we substitute the `generator_actions` part with CURRENT generator_command.
-        obs_buf_dict["generator_actions"] = generator_command * self.obs_scales.get("generator_actions", 1.0)
-
         # Now construct tracker_obs
         tracker_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("tracker_obs", self.tracker_obs_config)], dtype=np.float32)
 
