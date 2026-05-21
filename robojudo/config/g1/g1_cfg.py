@@ -31,6 +31,7 @@ from .policy.g1_protomotions_tracker_cfg import ProtoMotionsTrackerPolicyCfg  # 
 from .policy.g1_smooth_policy_cfg import G1SmoothPolicyCfg  # noqa: F401
 from .policy.g1_twist_policy_cfg import G1TwistPolicyCfg  # noqa: F401
 from .policy.g1_unitree_policy_cfg import G1UnitreePolicyCfg, G1UnitreeWoGaitPolicyCfg  # noqa: F401
+from .policy.g1_visualmimic_policy_cfg import G1VisualmimicPolicyCfg  # noqa: F401
 
 
 # ======================== Basic Configs ======================== #
@@ -296,6 +297,20 @@ class g1_twist(RlPipelineCfg):
     ]
 
     policy: G1TwistPolicyCfg = G1TwistPolicyCfg()
+
+
+@cfg_registry.register
+class g1_visualmimic(RlPipelineCfg):
+    """Unitree G1 configuration, VisualMimic Policy, Sim2Sim."""
+
+    robot: str = "g1"
+    env: G1MujocoEnvCfg = G1MujocoEnvCfg(forward_kinematic=None, update_with_fk=False, born_place_align=False)
+
+    ctrl: list[KeyboardCtrlCfg] = [
+        KeyboardCtrlCfg(),
+    ]
+
+    policy: G1VisualmimicPolicyCfg = G1VisualmimicPolicyCfg()
 
 
 # ======================== Fancy Example Configs ======================== #

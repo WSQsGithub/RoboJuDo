@@ -456,3 +456,83 @@ class HumanoidVersePolicyCfg(PolicyCfg):
         if self.model_path is None:
             return ""
         return self.model_path
+
+
+class VisualmimicPolicyCfg(PolicyCfg):
+    """Configuration for VisualMimic policy with tracker + generator architecture."""
+    
+    policy_type: str = "VisualmimicPolicy"
+    disable_autoload: bool = True
+    
+    # Tracker model configuration (PyTorch)
+    tracker_model_name: str  # e.g., "twist_general_motion_tracker"
+    
+    @property
+    def tracker_model_file(self) -> str:
+        """Path to tracker model file (PyTorch)."""
+        tracker_file = ASSETS_DIR / f"models/{self.robot}/twist/{self.tracker_model_name}.pt"
+        return tracker_file.as_posix()
+    
+    # Generator model configuration (ONNX)
+    generator_model_name: str = "pnp_generator"
+    
+    @property
+    def generator_model_file(self) -> str:
+        """Path to generator model file (ONNX)."""
+        generator_file = ASSETS_DIR / f"models/{self.robot}/visualmimic/{self.generator_model_name}.onnx"
+        return generator_file.as_posix()
+    
+    @property
+    def policy_file(self) -> str:
+        """Compatibility method - returns tracker model path."""
+        return self.tracker_model_file
+    
+    # Generator action configuration
+    action_scale: float = 0.5
+    action_clip: float | None = 10.0
+    action_beta: float = 1.0
+    
+    # Observation scales
+    class ObsScalesCfg(Config):
+        ang_vel: float = 0.25
+        dof_vel: float = 0.05
+        dof_pos: float = 1.0
+    
+    obs_scales: ObsScalesCfg = ObsScalesCfg()
+    
+    # History configuration for observation stacking
+    history_length: int = 10
+
+    # Tracker observation structure (aligned with Twist tracker input)
+    ankle_idx: list[int] = []
+    n_mimic_obs: int = 31
+    
+    @property
+    def history_obs_size(self) -> int:
+        """Size of one-step tracker observation before history stacking."""
+        # [mimic(31), ang_vel(3), rpy(2), dof_pos(num_dofs), dof_vel(num_dofs), actions(num_dofs)]
+        return self.n_mimic_obs + 3 + 2 + 3 * self.action_dof.num_dofs
+    
+    # Tracker output configuration
+    tracker_obs_wrist_ids: list[int] = []  # indices of wrist DOFs in tracker output
+    tracker_obs_total_degrees: int = 0  # total degrees in tracker motion output
+    
+    @property
+    def tracker_obs_other_ids(self) -> list[int]:
+        """Non-wrist DOF indices in tracker output."""
+        return [i for i in range(self.tracker_obs_total_degrees) if i not in self.tracker_obs_wrist_ids]
+    
+    # Generator configuration parameters
+    generator_action_mean: list[float] = []
+    generator_action_std: list[float] = []
+    generator_clip_std_multiplier: float = 1.64
+    
+    # Multi-input support for generator model
+    policy_input_keys: list[str] | None = None  # e.g., ["actor_obs_2d", "actor_obs"]
+    onnx_input_names: list[str] | None = None  # ONNX model input names
+    
+    commands_map: list[list[float]] = [
+        [-1.0, 0.0, 1.0],
+        [1.0, 0.0, -1.0],
+        [1.0, 0.0, -1.0],
+    ]
