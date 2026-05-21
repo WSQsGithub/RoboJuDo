@@ -247,6 +247,11 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             logger.debug("Invalid camera_depth shape: %s", getattr(depth, "shape", None))
             return np.zeros((1, height, width), dtype=np.float32)
 
+        # MuJoCo renders in OpenGL convention (row 0 = bottom of image).
+        # Flip vertically so the image matches training environment orientation
+        # where the hands are visible at the bottom of the frame.
+        depth = np.flipud(depth)
+
         # Resize by nearest-neighbor sampling to match generator input shape.
         src_h, src_w = depth.shape
         if (src_h, src_w) != (height, width):
