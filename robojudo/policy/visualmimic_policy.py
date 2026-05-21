@@ -264,6 +264,8 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self._depth_vis_warned = False
         self._depth_save_warned = False
         self._depth_vis_available = cv2 is not None
+        self._has_fresh_action = False
+        self._warned_get_action_without_obs = False
 
         self.reset()
 
@@ -339,6 +341,7 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self.timestep = 0
         self.last_action = np.zeros(self.num_actions, dtype=np.float32)
         self._stashed_action = np.zeros(self.num_actions, dtype=np.float32)
+        self._has_fresh_action = False
         
         # Reset the history handler for "envs" 0
         reset_ids = torch.tensor([0], device=self.device, dtype=torch.long)
@@ -668,6 +671,7 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         action = self._post_process_tracker_action(tracker_action)
         self._stashed_action = action.copy()
         self.last_action = action.copy()
+        self._has_fresh_action = True
 
         dummy_obs = np.zeros(1, dtype=np.float32)
         extras = {
@@ -737,9 +741,17 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         For VisualMimic, the action is already computed in get_observation,
         so this just returns the cached action.
         """
-        if hasattr(self, "_stashed_action"):
+        if self._has_fresh_action:
+            self._has_fresh_action = False
             return self._stashed_action.copy()
-        return np.zeros(self.num_actions, dtype=np.float32)
+
+        if not self._warned_get_action_without_obs:
+            logger.warning(
+                "get_action called before fresh get_observation; returning last_action."
+            )
+            self._warned_get_action_without_obs = True
+
+        return self.last_action.copy()
 
     def visualize_depth_map(self, depth_map: np.ndarray):
         """Visualize the depth map with OpenCV and refresh every step.
