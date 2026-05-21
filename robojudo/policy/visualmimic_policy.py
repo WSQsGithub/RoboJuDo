@@ -8,12 +8,17 @@ Based on HumanoidVerse framework.
 """
 
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
 import onnxruntime as rt
 import torch
-import matplotlib.pyplot as plt
+
+try:
+    import cv2  # pyright: ignore[reportMissingImports]
+except ImportError:
+    cv2 = None
 
 from robojudo.policy import policy_registry
 from robojudo.policy.humanoidverse_policy import HumanoidVersePolicy
@@ -55,6 +60,12 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self.ankle_idx = self.cfg_policy.ankle_idx
         self._history_template = np.zeros(self.history_obs_size, dtype=np.float32)
         self._init_history(self._history_template)
+
+        self._depth_window_name = "VisualMimic Depth"
+        self._depth_vis_warned = False
+        self._depth_save_warned = False
+        self._depth_vis_available = cv2 is not None
+
         self.reset()
 
     def _load_tracker_model(self):
@@ -405,6 +416,8 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             "action_raw": action,
         }
 
+        self.visualize_depth_map(actor_obs_2d)
+        
         return dummy_obs, extras
 
     def _post_process_generator_command(self, command: np.ndarray) -> np.ndarray:
@@ -464,24 +477,43 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         return np.zeros(self.num_actions, dtype=np.float32)
 
     def visualize_depth_map(self, depth_map: np.ndarray):
-        """Visualize the depth map using matplotlib.
+        """Visualize the depth map with OpenCV and refresh every step.
 
         Args:
-            depth_map: Depth map array to visualize (1xHxW).
+            depth_map: Depth map array to visualize (1xHxW), value range [0, 1].
         """
         if depth_map.ndim != 3 or depth_map.shape[0] != 1:
             logger.error("Invalid depth map shape for visualization: %s", depth_map.shape)
             return
 
-        # Remove the channel dimension for visualization
-        depth_map_2d = depth_map[0]
+        if not self._depth_vis_available:
+            if not self._depth_vis_warned:
+                logger.warning("OpenCV (cv2) is not installed, skip depth visualization.")
+                self._depth_vis_warned = True
+            return
 
-        plt.imshow(depth_map_2d, cmap="viridis")
-        plt.colorbar(label="Depth")
-        plt.title("Depth Map Visualization")
-        plt.xlabel("Width")
-        plt.ylabel("Height")
-        plt.show()
+        depth_map_2d = np.clip(depth_map[0], 0.0, 1.0)
+        depth_u8 = (depth_map_2d * 255.0).astype(np.uint8)
+        depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)
+
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        if has_display:
+            cv2.imshow(self._depth_window_name, depth_color)
+            cv2.waitKey(1)
+            return
+
+        # Headless fallback: dump a frame every 30 steps for offline inspection.
+        if self.timestep % 30 == 0:
+            output_dir = Path("logs/depth_debug")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_file = output_dir / f"depth_{self.timestep:06d}.png"
+            cv2.imwrite(output_file.as_posix(), depth_color)
+            if not self._depth_save_warned:
+                logger.warning(
+                    "No display detected; saving depth frames to %s",
+                    output_dir.as_posix(),
+                )
+                self._depth_save_warned = True
 
 if __name__ == "__main__":
     # Simple test
