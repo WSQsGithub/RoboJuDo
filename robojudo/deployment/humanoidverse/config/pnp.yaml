@@ -1,0 +1,198 @@
+defaults:
+- base
+runtime:
+  backend: onnx
+  model_path: assets/models/g1/visualmimic/pnp_model.onnx
+  providers:
+  - CPUExecutionProvider
+  input_name: actor_obs_2d
+  input_names:
+  - actor_obs_2d
+  - actor_obs
+  output_name: action
+  policy_input_key: actor_obs_2d
+  policy_input_keys:
+  - actor_obs_2d
+  - actor_obs
+  input_shapes: {}
+  action_dim: 23
+obs:
+  clip: 80.0
+  terms:
+    ego_cam:
+      dim: 3600
+      scale: 0.01
+    commands:
+      dim: 4
+      scale: 1.0
+    box_size:
+      dim: 3
+      scale: 1.0
+    box_mass:
+      dim: 1
+      scale: 1.0
+    box_target_pos_rel:
+      dim: 6
+      scale: 1.0
+    box_pos_rel:
+      dim: 3
+      scale: 1.0
+    box_rot_rel:
+      dim: 4
+      scale: 1.0
+    box_yaw_rel:
+      dim: 1
+      scale: 1.0
+    box_lin_vel_rel:
+      dim: 3
+      scale: 1.0
+    box_ang_vel_rel:
+      dim: 3
+      scale: 1.0
+    ee_pos_rel:
+      dim: 6
+      scale: 1.0
+    ee_rot_rel:
+      dim: 8
+      scale: 1.0
+    ee_lin_vel_rel:
+      dim: 6
+      scale: 1.0
+    ee_ang_vel_rel:
+      dim: 6
+      scale: 1.0
+    hand_contact_force:
+      dim: 6
+      scale: 1.0
+    phase_one_hot:
+      dim: 4
+      scale: 1.0
+    base_lin_vel:
+      dim: 3
+      scale: 2.0
+    base_ang_vel:
+      dim: 3
+      scale: 0.25
+    projected_gravity:
+      dim: 3
+      scale: 1.0
+    dof_pos:
+      dim: 23
+      scale: 1.0
+    dof_pos_actor:
+      dim: 23
+      scale: 1.0
+    dof_vel:
+      dim: 23
+      scale: 0.05
+    actions:
+      dim: 23
+      scale: 0.25
+    generator_actions:
+      dim: 31
+      scale: 1.0
+    push_force:
+      dim: 2
+      scale: 0.01
+    base_mass:
+      dim: 1
+      scale: 0.1
+    env_frictions:
+      dim: 1
+      scale: 1.0
+    dof_frictions:
+      dim: 23
+      scale: 1.0
+    dof_damping:
+      dim: 23
+      scale: 1.0
+    dof_armature:
+      dim: 23
+      scale: 1.0
+    kp:
+      dim: 23
+      scale: 0.01
+    kd:
+      dim: 23
+      scale: 0.1
+    tracker_proprio:
+      dim: 74
+      scale: 1.0
+    base_rp:
+      dim: 2
+      scale: 1.0
+    root_pos_z:
+      dim: 1
+      scale: 1.0
+    root_rot:
+      dim: 4
+      scale: 1.0
+  groups:
+    actor_obs_2d:
+    - ego_cam
+    actor_obs:
+    - commands
+    - ee_pos_rel
+    - ee_rot_rel
+    - phase_one_hot
+    - base_ang_vel
+    - projected_gravity
+    - dof_pos
+    - dof_vel
+    - actions
+    - generator_actions
+    critic_obs:
+    - commands
+    - box_size
+    - box_mass
+    - box_target_pos_rel
+    - box_pos_rel
+    - box_rot_rel
+    - box_yaw_rel
+    - box_lin_vel_rel
+    - box_ang_vel_rel
+    - ee_pos_rel
+    - ee_rot_rel
+    - ee_lin_vel_rel
+    - ee_ang_vel_rel
+    - hand_contact_force
+    - phase_one_hot
+    - base_lin_vel
+    - base_ang_vel
+    - projected_gravity
+    - dof_pos
+    - dof_vel
+    - actions
+    - generator_actions
+    tracker_obs:
+    - generator_actions
+    - tracker_proprio
+    teacher_obs:
+    - commands
+    - box_size
+    - box_mass
+    - box_target_pos_rel
+    - box_pos_rel
+    - box_rot_rel
+    - box_yaw_rel
+    - box_lin_vel_rel
+    - box_ang_vel_rel
+    - ee_pos_rel
+    - ee_rot_rel
+    - ee_lin_vel_rel
+    - ee_ang_vel_rel
+    - hand_contact_force
+    - phase_one_hot
+    - base_lin_vel
+    - base_ang_vel
+    - projected_gravity
+    - dof_pos
+    - dof_vel
+    - actions
+    - generator_actions
+  history: {}
+  outputs:
+    actor_obs_2d:
+    - actor_obs_2d
+    actor_obs:
+    - actor_obs

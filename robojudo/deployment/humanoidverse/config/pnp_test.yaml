@@ -1,0 +1,144 @@
+defaults:
+- base
+runtime:
+  backend: onnx
+  model_path: assets/models/g1/visualmimic/pnp_model.onnx
+  providers:
+  - CPUExecutionProvider
+  input_name: actor_obs
+  input_names: []
+  output_name: action
+  policy_input_key: actor_obs
+  policy_input_keys: []
+  input_shapes: {}
+  action_dim: 23
+obs:
+  clip: 80.0
+  terms:
+    commands:
+      dim: 4
+      scale: 1.0
+    box_size:
+      dim: 3
+      scale: 1.0
+    box_mass:
+      dim: 1
+      scale: 1.0
+    box_target_pos_rel:
+      dim: 6
+      scale: 1.0
+    box_pos_rel:
+      dim: 3
+      scale: 1.0
+    box_rot_rel:
+      dim: 4
+      scale: 1.0
+    box_yaw_rel:
+      dim: 1
+      scale: 1.0
+    box_lin_vel_rel:
+      dim: 3
+      scale: 1.0
+    box_ang_vel_rel:
+      dim: 3
+      scale: 1.0
+    ee_pos_rel:
+      dim: 6
+      scale: 1.0
+    ee_rot_rel:
+      dim: 8
+      scale: 1.0
+    ee_lin_vel_rel:
+      dim: 6
+      scale: 1.0
+    ee_ang_vel_rel:
+      dim: 6
+      scale: 1.0
+    hand_contact_force:
+      dim: 6
+      scale: 1.0
+    phase_one_hot:
+      dim: 4
+      scale: 1.0
+    base_lin_vel:
+      dim: 3
+      scale: 2.0
+    base_ang_vel:
+      dim: 3
+      scale: 0.25
+    projected_gravity:
+      dim: 3
+      scale: 1.0
+    push_force:
+      dim: 2
+      scale: 0.01
+    base_mass:
+      dim: 1
+      scale: 0.1
+    env_frictions:
+      dim: 1
+      scale: 1.0
+    tracker_proprio:
+      dim: 74
+      scale: 1.0
+    base_rp:
+      dim: 2
+      scale: 1.0
+    root_pos_z:
+      dim: 1
+      scale: 1.0
+    root_rot:
+      dim: 4
+      scale: 1.0
+  groups:
+    actor_obs:
+    - commands
+    - ee_pos_rel
+    - ee_rot_rel
+    - phase_one_hot
+    - base_ang_vel
+    - projected_gravity
+    - dof_pos
+    - dof_vel
+    - actions
+    - generator_actions
+    - short_history
+  history:
+    short_history:
+      commands: 5
+      ee_pos_rel: 5
+      ee_rot_rel: 5
+      phase_one_hot: 5
+      base_ang_vel: 5
+      projected_gravity: 5
+      dof_pos: 5
+      dof_vel: 5
+      actions: 5
+      generator_actions: 5
+    history:
+      commands: 5
+      box_target_pos_rel: 5
+      box_pos_rel: 5
+      box_rot_rel: 5
+      box_yaw_rel: 5
+      box_lin_vel_rel: 5
+      box_ang_vel_rel: 5
+      ee_pos_rel: 5
+      ee_rot_rel: 5
+      ee_lin_vel_rel: 5
+      ee_ang_vel_rel: 5
+      hand_contact_force: 5
+      phase_one_hot: 5
+      base_lin_vel: 5
+      base_ang_vel: 5
+      projected_gravity: 5
+      dof_pos: 5
+      dof_vel: 5
+      actions: 5
+      generator_actions: 5
+    long_history:
+      generator_actions: 10
+      tracker_proprio: 10
+  outputs:
+    actor_obs:
+    - actor_obs
