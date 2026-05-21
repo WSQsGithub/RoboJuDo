@@ -530,6 +530,12 @@ class VisualmimicPolicyCfg(PolicyCfg):
     # Multi-input support for generator model
     policy_input_keys: list[str] | None = None  # e.g., ["actor_obs_2d", "actor_obs"]
     onnx_input_names: list[str] | None = None  # ONNX model input names
+
+    # Depth image preprocessing for actor_obs_2d
+    depth_clip_near: float = 0.1
+    depth_clip_far: float = 5.0
+    actor_obs_2d_height: int = 45
+    actor_obs_2d_width: int = 80
     
     commands_map: list[list[float]] = [
         [-1.0, 0.0, 1.0],

@@ -304,7 +304,15 @@ class g1_visualmimic(RlPipelineCfg):
     """Unitree G1 configuration, VisualMimic Policy, Sim2Sim."""
 
     robot: str = "g1"
-    env: G1MujocoEnvCfg = G1MujocoEnvCfg(forward_kinematic=None, update_with_fk=False, born_place_align=False)
+    env: G1MujocoEnvCfg = G1MujocoEnvCfg(
+        forward_kinematic=None,
+        update_with_fk=False,
+        born_place_align=False,
+        enable_depth_camera=True,
+        depth_camera_name="ego_depth",
+        depth_width=80,
+        depth_height=45,
+    )
 
     ctrl: list[KeyboardCtrlCfg] = [
         KeyboardCtrlCfg(),

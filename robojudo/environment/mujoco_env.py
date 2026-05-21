@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 
 import mujoco
@@ -31,20 +32,47 @@ class MujocoEnv(Environment):
         # mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
         mujoco.mj_step(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
 
-        self.viewer = mujoco_viewer.MujocoViewer(
-            self.model,
-            self.data,
-            width=1200,
-            height=900,
-            hide_menus=True,
-            diable_key_callbacks=True,
-        )
-        self.viewer.cam.distance = 3.0
-        self.viewer.cam.elevation = -10.0
-        self.viewer.cam.azimuth = 180.0
-        # self.viewer._paused = True
+        self.viewer = None
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        if cfg_env.enable_viewer and has_display:
+            self.viewer = mujoco_viewer.MujocoViewer(
+                self.model,
+                self.data,
+                width=1200,
+                height=900,
+                hide_menus=True,
+                diable_key_callbacks=True,
+            )
+            self.viewer.cam.distance = 3.0
+            self.viewer.cam.elevation = -10.0
+            self.viewer.cam.azimuth = 180.0
+            # self.viewer._paused = True
+        elif cfg_env.enable_viewer and not has_display:
+            logger.warning("DISPLAY/WAYLAND_DISPLAY not set, MuJoCo viewer disabled.")
 
-        if cfg_env.visualize_extras:
+        self.enable_depth_camera = bool(cfg_env.enable_depth_camera)
+        self.depth_camera_name = cfg_env.depth_camera_name
+        self.depth_renderer = None
+        self._depth_render_failed = False
+        if self.enable_depth_camera:
+            try:
+                self.depth_renderer = mujoco.Renderer(
+                    self.model,
+                    width=int(cfg_env.depth_width),
+                    height=int(cfg_env.depth_height),
+                )
+                logger.info(
+                    "Depth renderer initialized (%sx%s), camera=%s",
+                    cfg_env.depth_width,
+                    cfg_env.depth_height,
+                    self.depth_camera_name if self.depth_camera_name is not None else "free",
+                )
+            except Exception as e:
+                logger.warning("Failed to initialize depth renderer: %s", e)
+                self.depth_renderer = None
+                self.enable_depth_camera = False
+
+        if cfg_env.visualize_extras and self.viewer is not None:
             self.visualizer = MujocoVisualizer(self.viewer)
         else:
             self.visualizer = None
@@ -136,14 +164,36 @@ class MujocoEnv(Environment):
             self._torso_quat = fk_info[self._torso_name]["quat"]
             self._torso_pos = fk_info[self._torso_name]["pos"]
 
+        self._update_depth_frame()
+
+    def _update_depth_frame(self):
+        if not self.enable_depth_camera or self.depth_renderer is None:
+            self._camera_depth = None
+            return
+
+        try:
+            camera = self.depth_camera_name if self.depth_camera_name else -1
+            self.depth_renderer.enable_depth_rendering()
+            self.depth_renderer.update_scene(self.data, camera=camera)
+            depth = self.depth_renderer.render()
+            self.depth_renderer.disable_depth_rendering()
+            self._camera_depth = np.asarray(depth, dtype=np.float32)
+        except Exception as e:
+            if not self._depth_render_failed:
+                logger.warning("Depth rendering failed, disable depth stream: %s", e)
+                self._depth_render_failed = True
+            self.enable_depth_camera = False
+            self._camera_depth = None
+
     def step(self, pd_target, hand_pose=None):
         assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"
 
         if hand_pose is not None:
             logger.info("Hand pose-->", hand_pose)
 
-        self.viewer.cam.lookat = self.data.qpos.astype(np.float32)[:3]
-        if self.viewer.is_alive:
+        if self.viewer is not None:
+            self.viewer.cam.lookat = self.data.qpos.astype(np.float32)[:3]
+        if self.viewer is not None and self.viewer.is_alive:
             self.viewer.render()
 
         for _ in range(self.sim_decimation):
@@ -157,7 +207,13 @@ class MujocoEnv(Environment):
         self.update(simple=False)
 
     def shutdown(self):
-        self.viewer.close()
+        if self.depth_renderer is not None:
+            try:
+                self.depth_renderer.close()
+            except Exception:
+                pass
+        if self.viewer is not None:
+            self.viewer.close()
 
 
 if __name__ == "__main__":

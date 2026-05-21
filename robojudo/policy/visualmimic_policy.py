@@ -217,16 +217,41 @@ class VisualmimicPolicy(HumanoidVersePolicy):
     def _build_actor_obs_2d(self, env_data) -> np.ndarray:
         """Build actor_obs_2d: Visual observation for CNN head.
         
-        Shape: [1, 45, 80] (grayscale image)
-        In deployment, this would come from ego camera. For now, return placeholder.
+        Shape: [1, H, W] (single-channel depth image)
+        Priority: use env_data.camera_depth (MuJoCo), fallback to zeros.
         
         Returns:
-            Visual observation array (45x80 grayscale image)
+            Visual observation array (1xHxW), normalized to [0, 1]
         """
-        # TODO: Replace with actual camera sensor data when available
-        # Model expects [batch=1, channels=1, height=45, width=80]
-        actor_obs_2d = np.zeros((1, 45, 80), dtype=np.float32)
-        return actor_obs_2d
+        height = int(self.cfg_policy.actor_obs_2d_height)
+        width = int(self.cfg_policy.actor_obs_2d_width)
+        depth = getattr(env_data, "camera_depth", None)
+
+        if depth is None:
+            return np.zeros((1, height, width), dtype=np.float32)
+
+        depth = np.asarray(depth, dtype=np.float32)
+        if depth.ndim != 2 or depth.size == 0:
+            logger.debug("Invalid camera_depth shape: %s", getattr(depth, "shape", None))
+            return np.zeros((1, height, width), dtype=np.float32)
+
+        # Resize by nearest-neighbor sampling to match generator input shape.
+        src_h, src_w = depth.shape
+        if (src_h, src_w) != (height, width):
+            y_idx = np.linspace(0, src_h - 1, height).astype(np.int32)
+            x_idx = np.linspace(0, src_w - 1, width).astype(np.int32)
+            depth = depth[y_idx][:, x_idx]
+
+        near = float(self.cfg_policy.depth_clip_near)
+        far = float(self.cfg_policy.depth_clip_far)
+        if far <= near:
+            far = near + 1.0
+
+        depth = np.nan_to_num(depth, nan=far, posinf=far, neginf=near)
+        depth = np.clip(depth, near, far)
+        depth = (depth - near) / (far - near)
+
+        return np.expand_dims(depth.astype(np.float32), axis=0)
 
     def _build_actor_obs(self, env_data, ctrl_data) -> np.ndarray:
         """Build actor_obs: Proprioceptive observation for generator (768D).

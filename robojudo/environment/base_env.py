@@ -36,6 +36,7 @@ class Environment(ABC):
         self._base_pos: np.ndarray | None = None
         self._base_lin_vel: np.ndarray | None = None
         self._base_lin_acc: np.ndarray | None = None
+        self._camera_depth: np.ndarray | None = None
         self._torso_pos: np.ndarray | None = None
         self._torso_quat: np.ndarray | None = None
         self._torso_ang_vel: np.ndarray | None = None
@@ -143,6 +144,10 @@ class Environment(ABC):
         return self._base_lin_acc.copy() if self._base_lin_acc is not None else None
 
     @property
+    def camera_depth(self):
+        return self._camera_depth.copy() if self._camera_depth is not None else None
+
+    @property
     def torso_pos(self):
         return self._torso_pos.copy() if self._torso_pos is not None else None
 
@@ -166,6 +171,7 @@ class Environment(ABC):
             "base_quat": self.base_quat,
             "base_ang_vel": self.base_ang_vel,
             "base_lin_acc": self.base_lin_acc,
+            "camera_depth": self.camera_depth,
             "base_pos": self.base_pos,
             "base_lin_vel": self.base_lin_vel,
             "torso_pos": self.torso_pos,

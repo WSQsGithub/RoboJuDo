@@ -35,6 +35,16 @@ class MujocoEnvCfg(EnvCfg):
     sim_decimation: int = 20
 
     visualize_extras: bool = True  # TODO: remove
+    enable_viewer: bool = True
+    """Whether to create the interactive MuJoCo viewer window."""
+
+    enable_depth_camera: bool = False
+    """Whether to render and expose depth image as env_data.camera_depth."""
+    depth_camera_name: str | None = None
+    """Named MuJoCo camera for depth rendering. If None, use free camera."""
+    depth_width: int = 80
+    depth_height: int = 45
+    """Offscreen depth render resolution."""
 
     random_heading: bool = False
     """Randomize the robot's yaw heading on each spawn/reborn (useful for testing heading alignment)."""
