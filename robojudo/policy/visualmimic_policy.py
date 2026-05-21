@@ -56,10 +56,32 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self._init_generator_config()
 
         self._cached_commands = np.zeros(3, dtype=np.float32)
-        self.obs_scales = self.cfg_policy.obs_scales
+        # _cached_generator_command holds the most recent generator output;
+        # initialised to default_generator_actions so actor_obs has a sensible value on step 0.
+        if self.cfg_policy.generator_default_actions:
+            self._cached_generator_command = np.array(
+                self.cfg_policy.generator_default_actions, dtype=np.float32
+            )
+        else:
+            self._cached_generator_command = np.zeros(self.cfg_policy.n_mimic_obs, dtype=np.float32)
+
+        self.obs_scales = self.cfg_policy.obs_scales  # flat dict[str, float]
         self.ankle_idx = self.cfg_policy.ankle_idx
-        self._history_template = np.zeros(self.history_obs_size, dtype=np.float32)
+
+        # --- long_history buffer (for tracker_obs) ---
+        # Frame template: [generator_actions (n_mimic_obs), tracker_proprio (zeros)]
+        # Training initialises generator_actions frames with default_generator_actions.
+        history_obs_size = self.cfg_policy.history_obs_size
+        if self.cfg_policy.generator_default_actions:
+            default_gen = np.array(self.cfg_policy.generator_default_actions, dtype=np.float32)
+            prop_zeros = np.zeros(history_obs_size - len(default_gen), dtype=np.float32)
+            self._history_template = np.concatenate([default_gen, prop_zeros])
+        else:
+            self._history_template = np.zeros(history_obs_size, dtype=np.float32)
         self._init_history(self._history_template)
+
+        # --- short_history buffer (for actor_obs) ---
+        self._init_short_history()
 
         self._depth_window_name = "VisualMimic Depth"
         self._depth_vis_warned = False
@@ -135,6 +157,30 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             self.generator_action_mean = np.zeros(self.num_actions, dtype=np.float32)
             self.generator_action_std = np.ones(self.num_actions, dtype=np.float32)
 
+    def _init_short_history(self):
+        """Initialise short_history deque from short_history_config and obs_dims."""
+        from collections import deque as _deque
+        cfg = self.cfg_policy
+        if cfg.short_history_config and cfg.obs_dims:
+            sh_frames = max(cfg.short_history_config.values())
+            # Build initial frame: zeros for all keys except generator_actions
+            frame_parts = []
+            for k in cfg.short_history_config.keys():
+                dim = cfg.obs_dims.get(k, 0)
+                if k == "generator_actions" and cfg.generator_default_actions:
+                    val = np.array(cfg.generator_default_actions, dtype=np.float32)
+                    val = val * cfg.obs_scales.get(k, 1.0)
+                else:
+                    val = np.zeros(dim, dtype=np.float32)
+                frame_parts.append(val)
+            sh_template = np.concatenate(frame_parts, dtype=np.float32)
+            self.short_history_buf = _deque(
+                [sh_template.copy() for _ in range(sh_frames)], maxlen=sh_frames
+            )
+        else:
+            from collections import deque as _deque
+            self.short_history_buf = _deque(maxlen=0)
+
     def reset(self):
         """Reset policy state."""
         self.timestep = 0
@@ -142,6 +188,7 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self._stashed_action = np.zeros(self.num_actions, dtype=np.float32)
         if self.history_length > 0:
             self._init_history(self._history_template)
+        self._init_short_history()
 
     def post_step_callback(self, commands=None):
         """Called after each step."""
@@ -226,6 +273,54 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         """Get base quaternion observation."""
         return env_data.base_quat
 
+    # --- Aliases matching training obs-key names ---
+
+    def _get_obs_commands(self, env_data, ctrl_data):
+        """Alias: training key 'commands' maps to _get_obs_command."""
+        return self._get_obs_command(env_data, ctrl_data)
+
+    def _get_obs_actions(self, env_data, ctrl_data=None):
+        """Alias: training key 'actions' maps to last_action (raw, unscaled)."""
+        return self.last_action
+
+    # --- Composite obs methods for tracker_obs ---
+
+    def _get_obs_generator_actions(self, env_data=None, ctrl_data=None) -> np.ndarray:
+        """Return latest generator command (31D, raw — scale applied by dispatcher)."""
+        return self._cached_generator_command.copy()
+
+    def _get_obs_tracker_proprio(self, env_data, ctrl_data=None) -> np.ndarray:
+        """Build tracker_proprio (74D) with sub-component scaling applied internally.
+
+        Mirrors training's _get_obs_tracker_proprio:
+          base_ang_vel * obs_scales[base_ang_vel]
+          base_rp      * obs_scales[base_rp]
+          dof_pos      * obs_scales[dof_pos]
+          dof_vel      * obs_scales[dof_vel]  (ankle zeros zeroed first)
+          actions      * obs_scales[actions]
+
+        Returns pre-scaled 74D vector.  Top-level obs_scales[tracker_proprio]=1.0 is a no-op.
+        """
+        scales = self.obs_scales
+        ang_vel = env_data.base_ang_vel * scales.get("base_ang_vel", 0.25)
+        rpy = quatToEuler(env_data.base_quat)
+        base_rp = rpy[:2] * scales.get("base_rp", 1.0)
+        dof_pos = (env_data.dof_pos - self.default_dof_pos) * scales.get("dof_pos", 1.0)
+        dof_vel = env_data.dof_vel.copy()
+        if self.ankle_idx:
+            dof_vel[self.ankle_idx] = 0.0
+        dof_vel *= scales.get("dof_vel", 0.05)
+        actions = self.last_action * scales.get("actions", 0.25)
+        return np.concatenate([ang_vel, base_rp, dof_pos, dof_vel, actions], dtype=np.float32)
+
+    def _get_obs_long_history(self, env_data=None, ctrl_data=None) -> np.ndarray:
+        """Return flattened long_history (frames * frame_dim), oldest frame first."""
+        return np.array(self.history_buf, dtype=np.float32).flatten()
+
+    def _get_obs_short_history(self, env_data=None, ctrl_data=None) -> np.ndarray:
+        """Return flattened short_history (frames * frame_dim), oldest frame first."""
+        return np.array(self.short_history_buf, dtype=np.float32).flatten()
+
     def _build_actor_obs_2d(self, env_data) -> np.ndarray:
         """Build actor_obs_2d: Visual observation for CNN head.
         
@@ -271,87 +366,89 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         return np.expand_dims(depth.astype(np.float32), axis=0)
 
     def _build_actor_obs(self, env_data, ctrl_data) -> np.ndarray:
-        """Build actor_obs: Proprioceptive observation for generator (768D).
-        
-        Includes: commands, base states, DOF states, last action
-        
-        Returns:
-            Proprioceptive observation array (768D)
+        """Build actor_obs using config-driven dispatch.
+
+        Iterates over actor_obs_config keys; calls _get_obs_{key}() when available,
+        otherwise zero-fills using obs_dims[key].  Applies obs_scales[key] to each part.
+        Total size is determined by actor_obs_dim (derived from obs_dims + actor_obs_config).
         """
         self._cached_commands = np.asarray(self._get_commands(ctrl_data), dtype=np.float32)
 
-        # Collect all proprioceptive components
-        obs_parts = []
+        cfg = self.cfg_policy
+        obs_parts: dict[str, np.ndarray] = {}
 
-        # Commands (4D: forward, lateral, rotation, stand)
-        commands_full = self._get_obs_command(env_data, ctrl_data)
-        obs_parts.append(commands_full)
+        for key in cfg.actor_obs_config:
+            if key == "short_history":
+                obs = self._get_obs_short_history(env_data, ctrl_data)
+            else:
+                get_fn = getattr(self, f"_get_obs_{key}", None)
+                if get_fn is not None:
+                    obs = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32)
+                else:
+                    # Zero-fill for observations not available in deployment
+                    obs = np.zeros(cfg.obs_dims.get(key, 0), dtype=np.float32)
+                obs = obs * cfg.obs_scales.get(key, 1.0)
+            obs_parts[key] = obs.astype(np.float32)
 
-        # Base state
-        base_ang_vel = self._get_obs_base_ang_vel(env_data, ctrl_data)
-        obs_parts.append(base_ang_vel)
+        # Update short_history buffer with the current scaled frame for next step
+        if cfg.short_history_config:
+            frame_parts = [
+                obs_parts.get(k, np.zeros(cfg.obs_dims.get(k, 0), dtype=np.float32))
+                for k in cfg.short_history_config.keys()
+            ]
+            self.short_history_buf.append(np.concatenate(frame_parts, dtype=np.float32))
 
-        projected_gravity = self._get_obs_projected_gravity(env_data, ctrl_data)
-        obs_parts.append(projected_gravity)
+        actor_obs = np.concatenate(
+            [obs_parts[k] for k in cfg.actor_obs_config], dtype=np.float32
+        )
 
-        # DOF state
-        dof_pos = self._get_obs_dof_pos(env_data, ctrl_data)
-        obs_parts.append(dof_pos)
-
-        dof_vel = self._get_obs_dof_vel(env_data, ctrl_data)
-        obs_parts.append(dof_vel)
-
-        # Last action
-        last_action = self._get_obs_last_action(env_data, ctrl_data)
-        obs_parts.append(last_action)
-
-        # Concatenate all components
-        actor_obs = np.concatenate(obs_parts, dtype=np.float32)
-        
-        # Pad to 768D if needed
-        if len(actor_obs) < 768:
-            padding = np.zeros(768 - len(actor_obs), dtype=np.float32)
-            actor_obs = np.concatenate([actor_obs, padding])
-        elif len(actor_obs) > 768:
-            actor_obs = actor_obs[:768]
+        expected = cfg.actor_obs_dim
+        if len(actor_obs) != expected:
+            logger.warning(
+                "actor_obs size %d != expected %d; padding/clipping to match.",
+                len(actor_obs), expected,
+            )
+            if len(actor_obs) < expected:
+                actor_obs = np.concatenate(
+                    [actor_obs, np.zeros(expected - len(actor_obs), dtype=np.float32)]
+                )
+            else:
+                actor_obs = actor_obs[:expected]
 
         return actor_obs
 
     def _build_tracker_obs(self, env_data, generator_command: np.ndarray) -> np.ndarray:
-        """Build tracker observation from generator command and proprioception.
+        """Build tracker_obs using config-driven dispatch over tracker_obs_config.
 
-        The generator output (31D) is the tracker command input.
+        Calls _get_obs_{key}(env_data) for each key in tracker_obs_config;
+        applies obs_scales[key].  After reading long_history, updates the
+        long_history buffer with the current [generator_actions, tracker_proprio] frame.
+        Obs sizes are fully derived from obs_dims — no hardcoded lengths.
         """
-        base_quat = env_data.base_quat
-        dof_pos = env_data.dof_pos
-        dof_vel = env_data.dof_vel
-        ang_vel = env_data.base_ang_vel
+        # Store generator command so _get_obs_generator_actions() returns it
+        self._cached_generator_command = generator_command
 
-        rpy = quatToEuler(base_quat)
+        cfg = self.cfg_policy
+        obs_parts: dict[str, np.ndarray] = {}
 
-        obs_dof_vel = dof_vel.copy()
-        if self.ankle_idx:
-            obs_dof_vel[self.ankle_idx] = 0.0
+        for key in cfg.tracker_obs_config:
+            get_fn = getattr(self, f"_get_obs_{key}", None)
+            if get_fn is None:
+                raise RuntimeError(f"No _get_obs_{key}() method found for tracker_obs")
+            obs = np.asarray(get_fn(env_data), dtype=np.float32)
+            obs_parts[key] = obs * cfg.obs_scales.get(key, 1.0)
 
-        obs_proprio = np.concatenate(
-            [
-                ang_vel * self.obs_scales.ang_vel,
-                rpy[:2],
-                (dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                obs_dof_vel * self.obs_scales.dof_vel,
-                self.last_action,
-            ],
+        # Update long_history buffer with the current scaled frame for next step.
+        # long_history was already read above before the append, preserving correct ordering.
+        history_frame = np.concatenate(
+            [obs_parts[k] for k in cfg.long_history_config.keys() if k in obs_parts],
             dtype=np.float32,
         )
+        self.history_buf.append(history_frame)
 
-        obs_full = np.concatenate([generator_command, obs_proprio], dtype=np.float32)
-        if self.history_length > 0:
-            obs_hist = np.array(self.history_buf, dtype=np.float32).flatten()
-            obs_buf = np.concatenate([obs_full, obs_hist], dtype=np.float32)
-            self.history_buf.append(obs_full)
-            return obs_buf
-
-        return obs_full
+        return np.concatenate(
+            [obs_parts[k] for k in cfg.tracker_obs_config], dtype=np.float32
+        )
 
     def get_observation(self, env_data, ctrl_data: dict) -> tuple[np.ndarray, dict]:
         """Get observation for the policy.

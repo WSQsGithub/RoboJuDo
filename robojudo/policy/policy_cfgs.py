@@ -491,28 +491,92 @@ class VisualmimicPolicyCfg(PolicyCfg):
     action_scale: float = 0.5
     action_clip: float | None = 10.0
     action_beta: float = 1.0
-    
-    # Observation scales
-    class ObsScalesCfg(Config):
-        ang_vel: float = 0.25
-        dof_vel: float = 0.05
-        dof_pos: float = 1.0
-    
-    obs_scales: ObsScalesCfg = ObsScalesCfg()
-    
-    # History configuration for observation stacking
-    history_length: int = 10
 
-    # Tracker observation structure (aligned with Twist tracker input)
+    # Observation structure from training obs_dict config.
+    # tracker_obs_config mirrors obs_dict.tracker_obs in pnp_config.yaml.
+    tracker_obs_config: list[str] = ["generator_actions", "tracker_proprio", "long_history"]
+    # actor_obs_config mirrors obs_dict.actor_obs in pnp_config.yaml.  Set in subclass.
+    actor_obs_config: list[str] = []
+
+    # Observation dimensions from training obs_dims in pnp_config.yaml.
+    # Maps obs key → scalar dimension.  Used to derive sizes and zero-fill unavailable obs.
+    obs_dims: dict[str, int] = {}
+
+    # Short history structure from training obs_auxiliary.short_history.
+    # Maps obs key → frame count.  Mirrors obs_auxiliary.short_history in pnp_config.yaml.
+    short_history_config: dict[str, int] = {}
+
+    # Flat observation scales matching obs_scales in training pnp_config.yaml.
+    # Replaces the previous ObsScalesCfg nested class.
+    obs_scales: dict[str, float] = {
+        "base_ang_vel": 0.25,
+        "base_rp": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 0.05,
+        "actions": 0.25,
+        "generator_actions": 1.0,
+        "tracker_proprio": 1.0,
+        "long_history": 1.0,
+        "commands": 1.0,
+        "projected_gravity": 1.0,
+        "short_history": 1.0,
+        "ee_pos_rel": 1.0,
+        "ee_rot_rel": 1.0,
+        "phase_one_hot": 1.0,
+    }
+
+    # long_history mirrors obs_auxiliary.long_history in training config.
+    # Keys are obs keys; values are frame counts.
+    # history_length is derived as max(long_history_config.values()).
+    long_history_config: dict[str, int] = {}  # e.g. {"generator_actions": 10, "tracker_proprio": 10}
+
+    # Default generator actions used to initialize history (long_history: generator_actions key).
+    # Matches robot.control.generator.default_actions in training config.
+    # When empty, zeros are used.
+    generator_default_actions: list[float] = []
+
+    @model_validator(mode="after")
+    def _derive_from_config(self):
+        # Derive n_mimic_obs from obs_dims if available
+        if self.obs_dims and "generator_actions" in self.obs_dims:
+            self.n_mimic_obs = self.obs_dims["generator_actions"]
+        # Derive history_length from long_history_config
+        if self.long_history_config:
+            self.history_length = max(self.long_history_config.values())
+        return self
+
+    # Tracker observation structure
     ankle_idx: list[int] = []
-    n_mimic_obs: int = 31
-    
+    n_mimic_obs: int = 31  # Overridden by _derive_from_config if obs_dims["generator_actions"] is set
+
     @property
     def history_obs_size(self) -> int:
-        """Size of one-step tracker observation before history stacking."""
-        # [mimic(31), ang_vel(3), rpy(2), dof_pos(num_dofs), dof_vel(num_dofs), actions(num_dofs)]
+        """Size of one history frame = sum of obs_dims for each long_history_config key."""
+        if self.obs_dims and self.long_history_config:
+            return sum(self.obs_dims.get(k, 0) for k in self.long_history_config.keys())
+        # Fallback: manual calculation
         return self.n_mimic_obs + 3 + 2 + 3 * self.action_dof.num_dofs
-    
+
+    @property
+    def short_history_obs_dim(self) -> int:
+        """Total flattened dim of short_history = sum(obs_dims[k] * frames for k in short_history_config)."""
+        if not self.short_history_config or not self.obs_dims:
+            return 0
+        return sum(self.obs_dims.get(k, 0) * f for k, f in self.short_history_config.items())
+
+    @property
+    def actor_obs_dim(self) -> int:
+        """Total flattened dim of actor_obs, derived from actor_obs_config and obs_dims."""
+        if not self.actor_obs_config or not self.obs_dims:
+            return 768  # Fallback for backward compatibility
+        total = 0
+        for key in self.actor_obs_config:
+            if key == "short_history":
+                total += self.short_history_obs_dim
+            else:
+                total += self.obs_dims.get(key, 0)
+        return total
+
     # Tracker output configuration
     tracker_obs_wrist_ids: list[int] = []  # indices of wrist DOFs in tracker output
     tracker_obs_total_degrees: int = 0  # total degrees in tracker motion output
