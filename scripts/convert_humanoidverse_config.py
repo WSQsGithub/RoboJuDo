@@ -40,14 +40,18 @@ def resolve_template_variable(hv_config: Dict[str, Any], var_str: str) -> int | 
 def extract_obs_terms(hv_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Extract observation terms and their properties from HumanoidVerse config."""
     obs_config = hv_config.get("obs", {})
-    obs_dims_list = obs_config.get("obs_dims", [])
+    obs_dims_raw = obs_config.get("obs_dims", [])
     obs_scales = obs_config.get("obs_scales", {})
 
-    # Convert obs_dims list to dict
-    obs_dims = {}
-    for item in obs_dims_list:
-        for key, value in item.items():
-            obs_dims[key] = value
+    # Convert obs_dims to dict (supports both list[dict] and dict)
+    obs_dims: Dict[str, Any] = {}
+    if isinstance(obs_dims_raw, dict):
+        obs_dims = dict(obs_dims_raw)
+    elif isinstance(obs_dims_raw, list):
+        for item in obs_dims_raw:
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    obs_dims[key] = value
 
     terms = {}
     for obs_name, dim_value in obs_dims.items():
@@ -76,16 +80,22 @@ def extract_actor_obs_group(hv_config: Dict[str, Any]) -> List[str]:
 
 
 def extract_history_config(hv_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """
-    Extract history configuration from HumanoidVerse config.
-    
-    Note: HumanoidVerse obs_auxiliary format is different from deployer history format.
-    For now, return empty dict and let users configure history manually if needed.
-    """
-    # HumanoidVerse obs_auxiliary defines terms with repeat counts
-    # Deployer history defines source group with steps
-    # These are incompatible, so we skip automatic conversion
-    return {}
+    """Extract obs_auxiliary history configuration from HumanoidVerse config."""
+    obs_aux = hv_config.get("obs", {}).get("obs_auxiliary", {})
+    if not isinstance(obs_aux, dict):
+        return {}
+
+    normalized: Dict[str, Dict[str, int]] = {}
+    for aux_key, aux_cfg in obs_aux.items():
+        if not isinstance(aux_cfg, dict):
+            continue
+        normalized[aux_key] = {}
+        for obs_key, repeat in aux_cfg.items():
+            try:
+                normalized[aux_key][obs_key] = int(repeat)
+            except (TypeError, ValueError):
+                continue
+    return normalized
 
 
 def calculate_actor_obs_size(
@@ -129,6 +139,8 @@ def create_deployer_config(
 
     # Get all obs groups from HumanoidVerse config
     obs_dict = hv_config.get("obs", {}).get("obs_dict", {})
+    if not isinstance(obs_dict, dict):
+        obs_dict = {}
     available_terms = set(obs_terms.keys())
     
     # Create groups: filter each group to only include existing terms
@@ -177,6 +189,15 @@ def create_deployer_config(
             "outputs": {
                 primary_group: [primary_group],  # Output only primary group by default
             },
+        },
+        "visualmimic": {
+            "obs_dict": obs_dict,
+            "obs_auxiliary": history_config,
+            "actor_obs_config": obs_dict.get("actor_obs", []),
+            "tracker_obs_config": obs_dict.get("tracker_obs", []),
+            "policy_input_keys": ["actor_obs_2d", "actor_obs"]
+            if "actor_obs_2d" in obs_dict
+            else [primary_group],
         },
     }
 

@@ -28,6 +28,58 @@ from robojudo.utils.util_func import command_remap, get_gravity_orientation, qua
 logger = logging.getLogger(__name__)
 
 
+class HistoryHandler:
+    def __init__(self, num_envs, history_config, obs_dims, device, reversed=False):
+        self.obs_dims = obs_dims
+        self.device = device
+        self.num_envs = num_envs
+        self.history = {}
+        self.reversed = reversed
+        self.add = self._append if reversed else self._add
+        self.buffer_config = {}
+
+        for _, aux_config in history_config.items():
+            for obs_key, obs_num in aux_config.items():
+                if obs_key in self.buffer_config:
+                    self.buffer_config[obs_key] = max(self.buffer_config[obs_key], obs_num)
+                else:
+                    self.buffer_config[obs_key] = obs_num
+
+        for key in self.buffer_config.keys():
+            self.history[key] = torch.zeros(
+                num_envs, self.buffer_config[key], obs_dims[key], device=self.device
+            )
+
+        logger.info("History Handler Initialized")
+        for key, value in self.buffer_config.items():
+            logger.info("History key=%s, len=%s", key, value)
+
+    def reset(self, reset_ids):
+        if len(reset_ids) == 0:
+            return
+        for key in self.history.keys():
+            self.history[key][reset_ids] *= 0.0
+
+    def _add(self, key: str, value: torch.Tensor):
+        if key not in self.history:
+            raise KeyError(f"Key {key} not found in history")
+        val = self.history[key].clone()
+        self.history[key][:, 1:] = val[:, :-1]
+        self.history[key][:, 0] = value.clone()
+
+    def _append(self, key: str, value: torch.Tensor):
+        if key not in self.history:
+            raise KeyError(f"Key {key} not found in history")
+        val = self.history[key].clone()
+        self.history[key][:, :-1] = val[:, 1:]
+        self.history[key][:, -1] = value.clone()
+
+    def query(self, key: str):
+        if key not in self.history:
+            raise KeyError(f"Key {key} not found in history")
+        return self.history[key].clone()
+
+
 @policy_registry.register
 class VisualmimicPolicy(HumanoidVersePolicy):
     """VisualMimic policy using ONNX generator model.
@@ -68,20 +120,24 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self.obs_scales = self.cfg_policy.obs_scales  # flat dict[str, float]
         self.ankle_idx = self.cfg_policy.ankle_idx
 
-        # --- long_history buffer (for tracker_obs) ---
-        # Frame template: [generator_actions (n_mimic_obs), tracker_proprio (zeros)]
-        # Training initialises generator_actions frames with default_generator_actions.
-        history_obs_size = self.cfg_policy.history_obs_size
-        if self.cfg_policy.generator_default_actions:
-            default_gen = np.array(self.cfg_policy.generator_default_actions, dtype=np.float32)
-            prop_zeros = np.zeros(history_obs_size - len(default_gen), dtype=np.float32)
-            self._history_template = np.concatenate([default_gen, prop_zeros])
-        else:
-            self._history_template = np.zeros(history_obs_size, dtype=np.float32)
-        self._init_history(self._history_template)
-
-        # --- short_history buffer (for actor_obs) ---
-        self._init_short_history()
+        history_config: dict[str, dict[str, int]] = {}
+        cfg_obs_aux = getattr(self.cfg_policy, "obs_auxiliary", None)
+        if isinstance(cfg_obs_aux, dict):
+            for aux_key, aux_cfg in cfg_obs_aux.items():
+                if isinstance(aux_cfg, dict):
+                    history_config[aux_key] = dict(aux_cfg)
+        if getattr(self.cfg_policy, "short_history_config", None):
+            history_config.setdefault("short_history", dict(self.cfg_policy.short_history_config))
+        if getattr(self.cfg_policy, "long_history_config", None):
+            history_config.setdefault("long_history", dict(self.cfg_policy.long_history_config))
+        
+        self.history_handler = HistoryHandler(
+            num_envs=1,
+            history_config=history_config,
+            obs_dims=self.cfg_policy.obs_dims,
+            device=torch.device(self.device),
+            reversed=False
+        )
 
         self._depth_window_name = "VisualMimic Depth"
         self._depth_vis_warned = False
@@ -157,38 +213,15 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             self.generator_action_mean = np.zeros(self.num_actions, dtype=np.float32)
             self.generator_action_std = np.ones(self.num_actions, dtype=np.float32)
 
-    def _init_short_history(self):
-        """Initialise short_history deque from short_history_config and obs_dims."""
-        from collections import deque as _deque
-        cfg = self.cfg_policy
-        if cfg.short_history_config and cfg.obs_dims:
-            sh_frames = max(cfg.short_history_config.values())
-            # Build initial frame: zeros for all keys except generator_actions
-            frame_parts = []
-            for k in cfg.short_history_config.keys():
-                dim = cfg.obs_dims.get(k, 0)
-                if k == "generator_actions" and cfg.generator_default_actions:
-                    val = np.array(cfg.generator_default_actions, dtype=np.float32)
-                    val = val * cfg.obs_scales.get(k, 1.0)
-                else:
-                    val = np.zeros(dim, dtype=np.float32)
-                frame_parts.append(val)
-            sh_template = np.concatenate(frame_parts, dtype=np.float32)
-            self.short_history_buf = _deque(
-                [sh_template.copy() for _ in range(sh_frames)], maxlen=sh_frames
-            )
-        else:
-            from collections import deque as _deque
-            self.short_history_buf = _deque(maxlen=0)
-
     def reset(self):
         """Reset policy state."""
         self.timestep = 0
         self.last_action = np.zeros(self.num_actions, dtype=np.float32)
         self._stashed_action = np.zeros(self.num_actions, dtype=np.float32)
-        if self.history_length > 0:
-            self._init_history(self._history_template)
-        self._init_short_history()
+        
+        # Reset the history handler for "envs" 0
+        reset_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+        self.history_handler.reset(reset_ids)
 
     def post_step_callback(self, commands=None):
         """Called after each step."""
@@ -289,6 +322,60 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         """Return latest generator command (31D, raw — scale applied by dispatcher)."""
         return self._cached_generator_command.copy()
 
+    def _get_obs_ee_pos_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("ee_pos_rel", 0), dtype=np.float32)
+    def _get_obs_ee_rot_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("ee_rot_rel", 0), dtype=np.float32)
+    def _get_obs_phase_one_hot(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("phase_one_hot", 0), dtype=np.float32)
+    def _get_obs_box_size(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_size", 0), dtype=np.float32)
+    def _get_obs_box_mass(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_mass", 0), dtype=np.float32)
+    def _get_obs_box_target_pos_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_target_pos_rel", 0), dtype=np.float32)
+    def _get_obs_box_pos_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_pos_rel", 0), dtype=np.float32)
+    def _get_obs_box_rot_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_rot_rel", 0), dtype=np.float32)
+    def _get_obs_box_yaw_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_yaw_rel", 0), dtype=np.float32)
+    def _get_obs_box_lin_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_lin_vel_rel", 0), dtype=np.float32)
+    def _get_obs_box_ang_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("box_ang_vel_rel", 0), dtype=np.float32)
+    def _get_obs_ee_lin_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("ee_lin_vel_rel", 0), dtype=np.float32)
+    def _get_obs_ee_ang_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("ee_ang_vel_rel", 0), dtype=np.float32)
+    def _get_obs_hand_contact_force(self, env_data, ctrl_data=None): return np.zeros(self.cfg_policy.obs_dims.get("hand_contact_force", 0), dtype=np.float32)
+    def _get_obs_ego_cam(self, env_data, ctrl_data=None):
+        return self._build_actor_obs_2d(env_data).flatten()
+
+    def _compose_aux_history(self, aux_name: str) -> np.ndarray:
+        aux_cfg = None
+        cfg_obs_aux = getattr(self.cfg_policy, "obs_auxiliary", None)
+        if isinstance(cfg_obs_aux, dict):
+            aux_cfg = cfg_obs_aux.get(aux_name)
+
+        if not isinstance(aux_cfg, dict):
+            if aux_name == "short_history":
+                aux_cfg = getattr(self.cfg_policy, "short_history_config", {})
+            elif aux_name == "long_history":
+                aux_cfg = getattr(self.cfg_policy, "long_history_config", {})
+            else:
+                aux_cfg = {}
+
+        parts: list[np.ndarray] = []
+        for obs_key, repeat in aux_cfg.items():
+            if obs_key not in self.history_handler.history:
+                dim = self.cfg_policy.obs_dims.get(obs_key, 0)
+                parts.append(np.zeros(dim * int(repeat), dtype=np.float32))
+                continue
+            hist = self.history_handler.query(obs_key)[0]  # [frames, dim]
+            repeat_n = min(int(repeat), hist.shape[0])
+            parts.append(hist[:repeat_n].reshape(-1).cpu().numpy().astype(np.float32))
+
+        if not parts:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(parts, dtype=np.float32)
+
+    def _get_obs_history(self, env_data=None, ctrl_data=None):
+        return self._compose_aux_history("history")
+
+    def _get_obs_long_history(self, env_data=None, ctrl_data=None):
+        return self._compose_aux_history("long_history")
+
+    def _get_obs_short_history(self, env_data=None, ctrl_data=None):
+        return self._compose_aux_history("short_history")
+
     def _get_obs_tracker_proprio(self, env_data, ctrl_data=None) -> np.ndarray:
         """Build tracker_proprio (74D) with sub-component scaling applied internally.
 
@@ -312,14 +399,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         dof_vel *= scales.get("dof_vel", 0.05)
         actions = self.last_action * scales.get("actions", 0.25)
         return np.concatenate([ang_vel, base_rp, dof_pos, dof_vel, actions], dtype=np.float32)
-
-    def _get_obs_long_history(self, env_data=None, ctrl_data=None) -> np.ndarray:
-        """Return flattened long_history (frames * frame_dim), oldest frame first."""
-        return np.array(self.history_buf, dtype=np.float32).flatten()
-
-    def _get_obs_short_history(self, env_data=None, ctrl_data=None) -> np.ndarray:
-        """Return flattened short_history (frames * frame_dim), oldest frame first."""
-        return np.array(self.short_history_buf, dtype=np.float32).flatten()
 
     def _build_actor_obs_2d(self, env_data) -> np.ndarray:
         """Build actor_obs_2d: Visual observation for CNN head.
@@ -365,151 +444,117 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
         return np.expand_dims(depth.astype(np.float32), axis=0)
 
-    def _build_actor_obs(self, env_data, ctrl_data) -> np.ndarray:
-        """Build actor_obs using config-driven dispatch.
-
-        Iterates over actor_obs_config keys; calls _get_obs_{key}() when available,
-        otherwise zero-fills using obs_dims[key].  Applies obs_scales[key] to each part.
-        Total size is determined by actor_obs_dim (derived from obs_dims + actor_obs_config).
-        """
-        self._cached_commands = np.asarray(self._get_commands(ctrl_data), dtype=np.float32)
-
-        cfg = self.cfg_policy
-        obs_parts: dict[str, np.ndarray] = {}
-
-        for key in cfg.actor_obs_config:
-            if key == "short_history":
-                obs = self._get_obs_short_history(env_data, ctrl_data)
-            else:
-                get_fn = getattr(self, f"_get_obs_{key}", None)
-                if get_fn is not None:
-                    obs = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32)
-                else:
-                    # Zero-fill for observations not available in deployment
-                    obs = np.zeros(cfg.obs_dims.get(key, 0), dtype=np.float32)
-                obs = obs * cfg.obs_scales.get(key, 1.0)
-            obs_parts[key] = obs.astype(np.float32)
-
-        # Update short_history buffer with the current scaled frame for next step
-        if cfg.short_history_config:
-            frame_parts = [
-                obs_parts.get(k, np.zeros(cfg.obs_dims.get(k, 0), dtype=np.float32))
-                for k in cfg.short_history_config.keys()
-            ]
-            self.short_history_buf.append(np.concatenate(frame_parts, dtype=np.float32))
-
-        actor_obs = np.concatenate(
-            [obs_parts[k] for k in cfg.actor_obs_config], dtype=np.float32
-        )
-
-        expected = cfg.actor_obs_dim
-        if len(actor_obs) != expected:
-            logger.warning(
-                "actor_obs size %d != expected %d; padding/clipping to match.",
-                len(actor_obs), expected,
-            )
-            if len(actor_obs) < expected:
-                actor_obs = np.concatenate(
-                    [actor_obs, np.zeros(expected - len(actor_obs), dtype=np.float32)]
-                )
-            else:
-                actor_obs = actor_obs[:expected]
-
-        return actor_obs
-
-    def _build_tracker_obs(self, env_data, generator_command: np.ndarray) -> np.ndarray:
-        """Build tracker_obs using config-driven dispatch over tracker_obs_config.
-
-        Calls _get_obs_{key}(env_data) for each key in tracker_obs_config;
-        applies obs_scales[key].  After reading long_history, updates the
-        long_history buffer with the current [generator_actions, tracker_proprio] frame.
-        Obs sizes are fully derived from obs_dims — no hardcoded lengths.
-        """
-        # Store generator command so _get_obs_generator_actions() returns it
-        self._cached_generator_command = generator_command
-
-        cfg = self.cfg_policy
-        obs_parts: dict[str, np.ndarray] = {}
-
-        for key in cfg.tracker_obs_config:
-            get_fn = getattr(self, f"_get_obs_{key}", None)
-            if get_fn is None:
-                raise RuntimeError(f"No _get_obs_{key}() method found for tracker_obs")
-            obs = np.asarray(get_fn(env_data), dtype=np.float32)
-            obs_parts[key] = obs * cfg.obs_scales.get(key, 1.0)
-
-        # Update long_history buffer with the current scaled frame for next step.
-        # long_history was already read above before the append, preserving correct ordering.
-        history_frame = np.concatenate(
-            [obs_parts[k] for k in cfg.long_history_config.keys() if k in obs_parts],
-            dtype=np.float32,
-        )
-        self.history_buf.append(history_frame)
-
-        return np.concatenate(
-            [obs_parts[k] for k in cfg.tracker_obs_config], dtype=np.float32
-        )
-
     def get_observation(self, env_data, ctrl_data: dict) -> tuple[np.ndarray, dict]:
         """Get observation for the policy.
         
-        Builds actor_obs_2d and actor_obs, runs generator inference.
-        
-        Args:
-            env_data: Environment data
-            ctrl_data: Control data dictionary
-            
-        Returns:
-            Tuple of (observation, extras dict)
+        Builds all obs keys, updates history handler, and constructs actor_obs_2d, actor_obs, tracker_obs.
         """
-        # Build both observation types
-        actor_obs_2d = self._build_actor_obs_2d(env_data)  # [1, 45, 80]
-        actor_obs = self._build_actor_obs(env_data, ctrl_data)  # [768]
+        self._cached_commands = np.asarray(self._get_commands(ctrl_data), dtype=np.float32)
 
-        # Prepare input tensors for ONNX model
-        # actor_obs_2d: needs to be [1, 1, 45, 80] (batch=1, channels=1, height=45, width=80)
-        # actor_obs: needs to be [1, 768] (batch=1, features=768)
+        # 1. Compute all primitive observations
+        # We need to collect all unique base observation keys from all groups in obs_dict
+        # as well as dependencies for history.
+        cfg = self.cfg_policy
+
+        obs_groups = getattr(cfg, "obs_dict", None)
+        if not isinstance(obs_groups, dict) or len(obs_groups) == 0:
+            obs_groups = {
+                "actor_obs": list(getattr(cfg, "actor_obs_config", [])),
+                "tracker_obs": list(getattr(cfg, "tracker_obs_config", [])),
+            }
+            policy_input_keys = list(getattr(cfg, "policy_input_keys", []))
+            onnx_input_names = list(getattr(cfg, "onnx_input_names", []))
+            if "actor_obs_2d" in policy_input_keys or "actor_obs_2d" in onnx_input_names:
+                obs_groups["actor_obs_2d"] = ["ego_cam"]
+        
+        obs_buf_dict = {}
+        for group_keys in obs_groups.values():
+            for key in group_keys:
+                if key not in ["shory_history", "long_history", "history", "short_history"]:
+                    get_fn = getattr(self, f"_get_obs_{key}", None)
+                    if get_fn is not None:
+                        obs = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32)
+                    else:
+                        obs = np.zeros(cfg.obs_dims.get(key, 0), dtype=np.float32)
+                    # Apply scale
+                    obs_buf_dict[key] = obs * cfg.obs_scales.get(key, 1.0)
+
+        # For tracker_proprio, it is built from parts:
+        if "tracker_proprio" not in obs_buf_dict:
+            obs_buf_dict["tracker_proprio"] = self._get_obs_tracker_proprio(env_data, ctrl_data)
+
+        # 2. Push primitive obs to HistoryHandler
+        for key in self.history_handler.history.keys():
+            if key in obs_buf_dict:
+                val = torch.from_numpy(obs_buf_dict[key]).unsqueeze(0).to(self.device).float()
+                self.history_handler.add(key, val)
+        
+        # 3. Compute history observations
+        for hist_key in ["short_history", "long_history", "history"]:
+            # Check if it is required by obs_dict groups
+            is_needed = any(hist_key in group for group in obs_groups.values())
+            if is_needed:
+                get_fn = getattr(self, f"_get_obs_{hist_key}", None)
+                if get_fn is not None:
+                    obs_buf_dict[hist_key] = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32) * cfg.obs_scales.get(hist_key, 1.0)
+        
+        # 4. Construct groups
+        actor_obs_2d = self._build_actor_obs_2d(env_data)  # We will manually fetch ego_cam if it's there
+        if "ego_cam" in obs_groups.get("actor_obs_2d", []):
+            actor_obs_2d = obs_buf_dict["ego_cam"].reshape(1, int(cfg.actor_obs_2d_height), int(cfg.actor_obs_2d_width))
+            actor_obs_2d = np.expand_dims(actor_obs_2d, axis=0) # [1, 1, H, W]
+        else:
+            actor_obs_2d = self._build_actor_obs_2d(env_data)
+
+        actor_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("actor_obs", cfg.actor_obs_config)], dtype=np.float32)
+
+        # Optional length matching
+        expected = cfg.actor_obs_dim
+        if len(actor_obs) != expected:
+            if len(actor_obs) < expected:
+                actor_obs = np.concatenate([actor_obs, np.zeros(expected - len(actor_obs), dtype=np.float32)])
+            else:
+                actor_obs = actor_obs[:expected]
+
         onnx_inputs = {
-            "actor_obs_2d": np.expand_dims(actor_obs_2d, axis=0).astype(np.float32),  # [1, 1, 45, 80]
-            "actor_obs": np.expand_dims(actor_obs, axis=0).astype(np.float32),  # [1, 768]
+            "actor_obs_2d": actor_obs_2d.astype(np.float32),
+            "actor_obs": np.expand_dims(actor_obs, axis=0).astype(np.float32),
         }
 
-        # Run generator inference: produces 31D command for tracker
+        # Run generator
         try:
             generator_output = self.generator_session.run(None, onnx_inputs)
-            # Extract action (first output) - shape [1, 31]
-            generator_command = generator_output[0].squeeze(axis=0).astype(np.float32)  # [31]
+            generator_command = generator_output[0].squeeze(axis=0).astype(np.float32)
         except Exception as e:
             logger.error(f"Generator inference failed: {e}")
-            import traceback
-            traceback.print_exc()
             generator_command = np.zeros(self.cfg_policy.n_mimic_obs, dtype=np.float32)
 
-        # Optional command clipping using generator stats (if shape matches)
         generator_command = self._post_process_generator_command(generator_command)
+        self._cached_generator_command = generator_command
 
-        # Build tracker observation from generator command + proprioception
-        tracker_obs = self._build_tracker_obs(env_data, generator_command)
+        # We must re-add generator_command to history and build tracker_obs? Wait.
+        # In training, generator_actions is added to history handler before!
+        # But in deployment, generator_actions for CURRENT step is NOT computed until we run the generator!
+        # So we used the PREVIOUS generator_command to push to history, and for `tracker_obs`, we substitute the `generator_actions` part with CURRENT generator_command.
+        obs_buf_dict["generator_actions"] = generator_command * cfg.obs_scales.get("generator_actions", 1.0)
 
-        # Run tracker inference: produces final robot action (23D)
+        # Now construct tracker_obs
+        tracker_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("tracker_obs", cfg.tracker_obs_config)], dtype=np.float32)
+
+        # Run tracker
         try:
             tracker_input = torch.from_numpy(tracker_obs).unsqueeze(0).float().to(self.device)
             with torch.no_grad():
                 tracker_action = self.tracker_model(tracker_input).cpu().numpy().squeeze(0)
         except Exception as e:
             logger.error(f"Tracker inference failed: {e}")
-            import traceback
-            traceback.print_exc()
             tracker_action = np.zeros(self.num_actions, dtype=np.float32)
 
-        # Post-process final tracker action
         action = self._post_process_tracker_action(tracker_action)
         self._stashed_action = action.copy()
         self.last_action = action.copy()
 
-        # Return dummy observation
         dummy_obs = np.zeros(1, dtype=np.float32)
-
         extras = {
             "actor_obs": actor_obs,
             "actor_obs_2d": actor_obs_2d,
@@ -518,9 +563,12 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             "action_raw": action,
         }
 
-        self.visualize_depth_map(actor_obs_2d)
-        
+        vis_depth = actor_obs_2d
+        if vis_depth.ndim == 4 and vis_depth.shape[0] == 1:
+            vis_depth = vis_depth[0]
+        self.visualize_depth_map(vis_depth)
         return dummy_obs, extras
+
 
     def _post_process_generator_command(self, command: np.ndarray) -> np.ndarray:
         """Post-process generator command.
