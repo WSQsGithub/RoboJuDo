@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as rt
 import torch
+import matplotlib.pyplot as plt
 
 from robojudo.policy import policy_registry
 from robojudo.policy.humanoidverse_policy import HumanoidVersePolicy
@@ -462,6 +463,25 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             return self._stashed_action.copy()
         return np.zeros(self.num_actions, dtype=np.float32)
 
+    def visualize_depth_map(self, depth_map: np.ndarray):
+        """Visualize the depth map using matplotlib.
+
+        Args:
+            depth_map: Depth map array to visualize (1xHxW).
+        """
+        if depth_map.ndim != 3 or depth_map.shape[0] != 1:
+            logger.error("Invalid depth map shape for visualization: %s", depth_map.shape)
+            return
+
+        # Remove the channel dimension for visualization
+        depth_map_2d = depth_map[0]
+
+        plt.imshow(depth_map_2d, cmap="viridis")
+        plt.colorbar(label="Depth")
+        plt.title("Depth Map Visualization")
+        plt.xlabel("Width")
+        plt.ylabel("Height")
+        plt.show()
 
 if __name__ == "__main__":
     # Simple test
