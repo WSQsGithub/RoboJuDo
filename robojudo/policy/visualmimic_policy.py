@@ -397,6 +397,33 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         return self._get_obs_command(env_data, ctrl_data)
 
     def _get_obs_actions(self, env_data, ctrl_data=None):
+        Priority: use env_data.camera_depth (MuJoCo), fallback to zeros.
+        
+        Returns:
+            Visual observation array (1xHxW), normalized to [0, 1]
+        """
+        width = self.config.robot.camera.width
+        height = self.config.robot.camera.height
+
+        depth = env_data.camera_depth.copy()
+
+        
+
+        if depth is None:
+            return np.zeros((1, height, width), dtype=np.float32)
+
+        depth = np.asarray(depth, dtype=np.float32)
+        if depth.ndim != 2 or depth.size == 0:
+            logger.debug("Invalid camera_depth shape: %s", getattr(depth, "shape", None))
+            return np.zeros((1, height, width), dtype=np.float32)
+
+        # Resize by nearest-neighbor sampling to match generator input shape.
+        src_h, src_w = depth.shape
+        if (src_h, src_w) != (height, width):
+            y_idx = np.linspace(0, src_h - 1, height).astype(np.int32)
+            x_idx = np.linspace(0, src_w - 1, width).astype(np.int32)
+            depth = depth[y_idx][:, x_idx]
+
         """Alias: training key 'actions' maps to last_action (raw, unscaled)."""
         return self.last_action
 
@@ -468,43 +495,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         history_config = self.config.obs.obs_auxiliary['long_history']
         return self._get_history(history_config)
     
-        Priority: use env_data.camera_depth (MuJoCo), fallback to zeros.
-        
-        Returns:
-            Visual observation array (1xHxW), normalized to [0, 1]
-        """
-        width = self.config.robot.camera.width
-        height = self.config.robot.camera.height
-
-        parts: list[np.ndarray] = []
-        for obs_key, repeat in aux_cfg.items():
-            if obs_key not in self.history_handler.history:
-                dim = self.obs_dims.get(obs_key, 0)
-                parts.append(np.zeros(dim * int(repeat), dtype=np.float32))
-                continue
-            hist = self.history_handler.query(obs_key)[0]  # [frames, dim]
-            repeat_n = min(int(repeat), hist.shape[0])
-            parts.append(hist[:repeat_n].reshape(-1).cpu().numpy().astype(np.float32))
-
-        if not parts:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(parts, dtype=np.float32)
-
-        if depth is None:
-            return np.zeros((1, height, width), dtype=np.float32)
-
-        depth = np.asarray(depth, dtype=np.float32)
-        if depth.ndim != 2 or depth.size == 0:
-            logger.debug("Invalid camera_depth shape: %s", getattr(depth, "shape", None))
-            return np.zeros((1, height, width), dtype=np.float32)
-
-        # Resize by nearest-neighbor sampling to match generator input shape.
-        src_h, src_w = depth.shape
-        if (src_h, src_w) != (height, width):
-            y_idx = np.linspace(0, src_h - 1, height).astype(np.int32)
-            x_idx = np.linspace(0, src_w - 1, width).astype(np.int32)
-            depth = depth[y_idx][:, x_idx]
-
     def _get_obs_short_history(self, env_data=None, ctrl_data=None):
         assert "short_history" in self.config.obs.obs_auxiliary.keys()
         history_config = self.config.obs.obs_auxiliary['short_history']
@@ -534,50 +524,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         actions = self.last_action * scales.get("actions", 0.25)
         return np.concatenate([ang_vel, base_rp, dof_pos, dof_vel, actions], dtype=np.float32)
 
-    def _build_actor_obs_2d(self, env_data) -> np.ndarray:
-        """Build actor_obs_2d: Visual observation for CNN head.
-        
-        Shape: [1, H, W] (single-channel depth image)
-        Priority: use env_data.camera_depth (MuJoCo), fallback to zeros.
-        
-        Returns:
-            Visual observation array (1xHxW), normalized to [0, 1]
-        """
-        height = int(self.cfg_policy.actor_obs_2d_height)
-        width = int(self.cfg_policy.actor_obs_2d_width)
-        depth = getattr(env_data, "camera_depth", None)
-
-        if depth is None:
-            return np.zeros((1, height, width), dtype=np.float32)
-
-        depth = np.asarray(depth, dtype=np.float32)
-        if depth.ndim != 2 or depth.size == 0:
-            logger.debug("Invalid camera_depth shape: %s", getattr(depth, "shape", None))
-            return np.zeros((1, height, width), dtype=np.float32)
-
-        # MuJoCo renders in OpenGL convention (row 0 = bottom of image).
-        # Flip vertically so the image matches training environment orientation
-        # where the hands are visible at the bottom of the frame.
-        depth = np.flipud(depth)
-
-        # Resize by nearest-neighbor sampling to match generator input shape.
-        src_h, src_w = depth.shape
-        if (src_h, src_w) != (height, width):
-            y_idx = np.linspace(0, src_h - 1, height).astype(np.int32)
-            x_idx = np.linspace(0, src_w - 1, width).astype(np.int32)
-            depth = depth[y_idx][:, x_idx]
-
-        near = float(self.cfg_policy.depth_clip_near)
-        far = float(self.cfg_policy.depth_clip_far)
-        if far <= near:
-            far = near + 1.0
-
-        depth = np.nan_to_num(depth, nan=far, posinf=far, neginf=near)
-        depth = np.clip(depth, near, far)
-        depth = (depth - near) / (far - near)
-
-        return np.expand_dims(depth.astype(np.float32), axis=0)
-
     def get_observation(self, env_data, ctrl_data: dict) -> tuple[np.ndarray, dict]:
         """Get observation for the policy.
         
@@ -590,16 +536,11 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         # as well as dependencies for history.
         cfg = self.cfg_policy
 
-        obs_groups = self.obs_dict
-        if not isinstance(obs_groups, dict) or len(obs_groups) == 0:
-            obs_groups = {
-                "actor_obs": list(self.actor_obs_config),
-                "tracker_obs": list(self.tracker_obs_config),
-            }
-            policy_input_keys = list(self.policy_input_keys)
-            onnx_input_names = list(self.onnx_input_names)
-            if "actor_obs_2d" in policy_input_keys or "actor_obs_2d" in onnx_input_names:
-                obs_groups["actor_obs_2d"] = ["ego_cam"]
+        obs_groups = {
+            "actor_obs": list(self.actor_obs_config),
+            "actor_obs_2d": ["ego_cam"],
+            "tracker_obs": list(self.tracker_obs_config),
+        }
         
         obs_buf_dict = {}
         for group_keys in obs_groups.values():
@@ -616,7 +557,10 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         # For tracker_proprio, it is built from parts:
         if "tracker_proprio" not in obs_buf_dict:
             obs_buf_dict["tracker_proprio"] = self._get_obs_tracker_proprio(env_data, ctrl_data)
-
+        
+        tracker_obs_dim = self._calc_tracker_obs_dim()
+        assert len(tracker_obs) == tracker_obs_dim
+        
         # 2. Push primitive obs to HistoryHandler
         for key in self.history_handler.history.keys():
             if key in obs_buf_dict:
@@ -643,15 +587,14 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         actor_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("actor_obs", self.actor_obs_config)], dtype=np.float32)
 
         # Optional length matching
-        expected = self._calc_actor_obs_dim()
-        if len(actor_obs) != expected:
-            if len(actor_obs) < expected:
-                actor_obs = np.concatenate([actor_obs, np.zeros(expected - len(actor_obs), dtype=np.float32)])
-            else:
-                actor_obs = actor_obs[:expected]
+        actor_obs_dim = self._calc_actor_obs_dim()
+        assert len(actor_obs) == actor_obs_dim
+
+        
+        actor_obs_2d = obs_buf_dict["ego_cam"]
 
         onnx_inputs = {
-            "actor_obs_2d": actor_obs_2d.astype(np.float32),
+            "actor_obs_2d": np.expand_dims(actor_obs_2d, axis=0).astype(np.float32),
             "actor_obs": np.expand_dims(actor_obs, axis=0).astype(np.float32),
         }
 
