@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as rt
 import torch
-import yaml
+from omegaconf import DictConfig, OmegaConf
 
 try:
     import cv2  # pyright: ignore[reportMissingImports]
@@ -91,68 +91,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
     cfg_policy: VisualmimicPolicyCfg
 
-    def _resolve_template_variable(self, var_str: str):
-        if not isinstance(var_str, str) or not var_str.startswith("${"):
-            return None
-        path = var_str[2:-1]
-        value = self.config
-        for part in path.split("."):
-            if isinstance(value, dict):
-                value = value.get(part)
-            else:
-                return None
-        return value
-
-    def _load_train_config(self) -> dict:
-        cfg_file = getattr(self.cfg_policy, "train_config_file", None)
-        if not cfg_file:
-            return {}
-        cfg_path = Path(cfg_file).expanduser()
-        if not cfg_path.exists():
-            logger.warning("Train config file not found: %s", cfg_path)
-            return {}
-        with open(cfg_path, "r") as f:
-            loaded = yaml.safe_load(f)
-        return loaded if isinstance(loaded, dict) else {}
-
-    def _extract_obs_dims(self) -> dict[str, int]:
-        obs_cfg = self.config.get("obs", {}) if isinstance(self.config, dict) else {}
-        obs_dims_raw = obs_cfg.get("obs_dims", {})
-
-        obs_dims: dict[str, int] = {}
-        if isinstance(obs_dims_raw, dict):
-            src_items = obs_dims_raw.items()
-        elif isinstance(obs_dims_raw, list):
-            merged = {}
-            for item in obs_dims_raw:
-                if isinstance(item, dict):
-                    merged.update(item)
-            src_items = merged.items()
-        else:
-            src_items = []
-
-        for key, value in src_items:
-            resolved = value
-            if isinstance(value, str) and value.startswith("${"):
-                resolved = self._resolve_template_variable(value)
-            try:
-                obs_dims[key] = int(resolved)
-            except (TypeError, ValueError):
-                continue
-        return obs_dims
-
-    def _calc_actor_obs_dim(self) -> int:
-        total = 0
-        for key in self.actor_obs_config:
-            if key == "short_history":
-                total += sum(
-                    self.obs_dims.get(obs_key, 0) * int(frames)
-                    for obs_key, frames in self.short_history_config.items()
-                )
-            else:
-                total += self.obs_dims.get(key, 0)
-        return total
-
     def __init__(self, cfg_policy: VisualmimicPolicyCfg, device: str = "cpu"):
         # Initialize base Policy class first
         from robojudo.policy.base_policy import Policy
@@ -162,63 +100,20 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self.config = self._load_train_config()
         obs_cfg = self.config.get("obs", {}) if isinstance(self.config, dict) else {}
 
-        self.obs_dict = obs_cfg.get("obs_dict", {}) if isinstance(obs_cfg.get("obs_dict", {}), dict) else {}
-        self.obs_auxiliary = (
-            obs_cfg.get("obs_auxiliary", {}) if isinstance(obs_cfg.get("obs_auxiliary", {}), dict) else {}
-        )
+        self.obs_dict = self.config.obs.obs_dict
+        self.obs_auxiliary = self.config.obs.obs_auxiliary
         self.obs_dims = self._extract_obs_dims()
-        self.obs_scales = (
-            obs_cfg.get("obs_scales", {}) if isinstance(obs_cfg.get("obs_scales", {}), dict) else {}
-        )
+        self.obs_scales = self.config.obs.obs_scales
 
-        self.actor_obs_config = list(self.obs_dict.get("actor_obs", []))
-        self.tracker_obs_config = list(self.obs_dict.get("tracker_obs", []))
-        self.short_history_config = dict(self.obs_auxiliary.get("short_history", {}))
-        self.long_history_config = dict(self.obs_auxiliary.get("long_history", {}))
-
-        if not self.actor_obs_config:
-            self.actor_obs_config = list(getattr(self.cfg_policy, "actor_obs_config", []))
-        if not self.tracker_obs_config:
-            self.tracker_obs_config = list(getattr(self.cfg_policy, "tracker_obs_config", []))
-        if not self.short_history_config:
-            self.short_history_config = dict(getattr(self.cfg_policy, "short_history_config", {}))
-        if not self.long_history_config:
-            self.long_history_config = dict(getattr(self.cfg_policy, "long_history_config", {}))
-        if not self.obs_dims:
-            self.obs_dims = dict(getattr(self.cfg_policy, "obs_dims", {}))
-        if not self.obs_scales:
-            self.obs_scales = dict(getattr(self.cfg_policy, "obs_scales", {}))
-
-        self.policy_input_keys = list(getattr(self.cfg_policy, "policy_input_keys", []) or [])
-        self.onnx_input_names = list(getattr(self.cfg_policy, "onnx_input_names", []) or [])
-
-        if not self.policy_input_keys:
-            if "actor_obs_2d" in self.obs_dict:
-                self.policy_input_keys = ["actor_obs_2d", "actor_obs"]
-            else:
-                self.policy_input_keys = ["actor_obs"]
-
-        if "generator_actions" in self.obs_dims:
-            self.cfg_policy.n_mimic_obs = int(self.obs_dims["generator_actions"])
-
-        if not self.cfg_policy.generator_default_actions:
-            default_actions = (
-                self.config.get("robot", {})
-                .get("control", {})
-                .get("generator", {})
-                .get("default_actions", [])
-            )
-            if isinstance(default_actions, list):
-                self.cfg_policy.generator_default_actions = [float(x) for x in default_actions]
-
-        self.cfg_policy.obs_dims = self.obs_dims
-        self.cfg_policy.obs_scales = self.obs_scales
-        self.cfg_policy.actor_obs_config = self.actor_obs_config
-        self.cfg_policy.tracker_obs_config = self.tracker_obs_config
-        self.cfg_policy.short_history_config = self.short_history_config
-        self.cfg_policy.long_history_config = self.long_history_config
-
-        self.commands_map = cfg_policy.commands_map
+        self.actor_obs_config = self.obs_dict.actor_obs
+        self.actor_obs_2d_config = self.obs_dict.actor_obs_2d
+        self.tracker_obs_config = self.obs_dict.tracker_obs
+        self.short_history_config = self.obs_auxiliary.short_history
+        self.long_history_config = self.obs_auxiliary.long_history
+        
+        self.ankle_idx = self.cfg_policy.ankle_idx
+        
+        self._init_generator_config()
 
         # Load generator model (ONNX)
         self._load_generator_model()
@@ -227,17 +122,13 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self._load_tracker_model()
 
         # Initialize generator action configuration
+        self.action_scale = self.config.robot.control.action_scale
         self._init_generator_config()
 
         self._cached_commands = np.zeros(3, dtype=np.float32)
         # _cached_generator_command holds the most recent generator output;
         # initialised to default_generator_actions so actor_obs has a sensible value on step 0.
-        if self.cfg_policy.generator_default_actions:
-            self._cached_generator_command = np.array(
-                self.cfg_policy.generator_default_actions, dtype=np.float32
-            )
-        else:
-            self._cached_generator_command = np.zeros(self.cfg_policy.n_mimic_obs, dtype=np.float32)
+        self._cached_generator_command = np.array(self.generator_default_actions, dtype=np.float32)
 
         self.ankle_idx = self.cfg_policy.ankle_idx
 
@@ -256,7 +147,65 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             num_envs=1,
             history_config=history_config,
             obs_dims=self.obs_dims,
+    def _load_train_config(self) -> DictConfig:
+            cfg_file = getattr(self.cfg_policy, "train_config_file", None)
+            if not cfg_file:
+                return OmegaConf.create({})
             device=torch.device(self.device),
+            cfg_path = Path(cfg_file).expanduser()
+            if not cfg_path.exists():
+                logger.warning("Train config file not found: %s", cfg_path)
+                return OmegaConf.create({})
+
+            try:
+                loaded = OmegaConf.load(cfg_path)
+                if loaded is None:
+                    return OmegaConf.create({})
+
+                if not isinstance(loaded, DictConfig):
+                    loaded = OmegaConf.create(loaded)
+
+                return loaded
+            except Exception as e:
+                logger.error("Failed to load/resolve train config %s: %s", cfg_path, e)
+                return OmegaConf.create({})
+
+    def _extract_obs_dims(self) -> dict[str, int]:
+        data = OmegaConf.to_container(
+            self.config.obs.obs_dims,
+            resolve=True
+        )
+
+        return {
+            k: int(v)
+            for kv in data
+            for k, v in kv.items()
+        }
+
+    def _calc_actor_obs_dim(self) -> int:
+        total = 0
+        for key in self.actor_obs_config:
+            if key == "short_history":
+                total += sum(
+                    self.obs_dims.get(obs_key, 0) * int(frames)
+                    for obs_key, frames in self.short_history_config.items()
+                )
+            else:
+                total += self.obs_dims.get(key, 0)
+        return total
+
+    def _calc_tracker_obs_dim(self) -> int: 
+        total = 0
+        for key in self.tracker_obs_config:
+            if key == "long_history":
+                total += sum(
+                    self.obs_dims.get(obs_key, 0) * int(frames)
+                    for obs_key, frames in self.long_history_config.items()
+                )
+            else:
+                total += self.obs_dims.get(key, 0)
+        return total
+    
             reversed=False
         )
 
@@ -300,11 +249,9 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             )
 
             # Get input and output names
-            self.generator_input_names = self.onnx_input_names
-            if not self.generator_input_names:
-                self.generator_input_names = [
-                    input.name for input in self.generator_session.get_inputs()
-                ]
+            self.generator_input_names = [
+                input.name for input in self.generator_session.get_inputs()
+            ]
 
             self.generator_output_names = [
                 output.name for output in self.generator_session.get_outputs()
@@ -323,12 +270,21 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             gen_mean = np.array(self.cfg_policy.generator_action_mean, dtype=np.float32)
             gen_std = np.array(self.cfg_policy.generator_action_std, dtype=np.float32)
 
-            self.generator_action_mean = gen_mean
-            self.generator_action_std = gen_std
+        self.generator_default_actions = np.array(self.config.robot.control.generator.default_actions, dtype=np.float32)
 
-            multiplier_std = self.cfg_policy.generator_clip_std_multiplier
-            self.generator_clip_action_limit_low = gen_mean - multiplier_std * gen_std
-            self.generator_clip_action_limit_high = gen_mean + multiplier_std * gen_std
+        gen_mean = np.array(self.config.robot.control.generator.action_clip_value.mean, dtype=np.float32)
+        gen_std = np.array(self.config.robot.control.generator.action_clip_value.std, dtype=np.float32)
+        multiplier_std = float(self.config.robot.control.generator.action_clip_value.clip_std_multiplier)
+            
+
+        self.generator_clip_action_limit_low = gen_mean - multiplier_std * gen_std
+        self.generator_clip_action_limit_high = gen_mean + multiplier_std * gen_std
+
+        logger.debug(
+            f"Generator action limits: "
+            f"[{self.generator_clip_action_limit_low[0]:.3f}, "
+            f"{self.generator_clip_action_limit_high[0]:.3f}]"
+        )
 
             logger.debug(f"Generator action limits: [{self.generator_clip_action_limit_low[0]:.3f}, "
                         f"{self.generator_clip_action_limit_high[0]:.3f}]")
