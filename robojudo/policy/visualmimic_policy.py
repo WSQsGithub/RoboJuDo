@@ -256,6 +256,7 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         """Initialize generator action normalization."""
 
         self.generator_default_actions = np.array(self.config.robot.control.generator.default_actions, dtype=np.float32)
+        self.generator_action_scale = float(self.config.robot.control.generator.action_scale)
 
         gen_mean = np.array(self.config.robot.control.generator.action_clip_value.mean, dtype=np.float32)
         gen_std = np.array(self.config.robot.control.generator.action_clip_value.std, dtype=np.float32)
@@ -504,11 +505,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         """
         self._cached_commands = np.asarray(self._get_commands(ctrl_data), dtype=np.float32)
 
-        # 1. Compute all primitive observations
-        # We need to collect all unique base observation keys from all groups in obs_dict
-        # as well as dependencies for history.
-        cfg = self.cfg_policy
-
         obs_groups = {
             "actor_obs": list(self.actor_obs_config),
             "actor_obs_2d": ["ego_cam"],
@@ -599,19 +595,13 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             Post-processed command
         """
         # Clip command based on learned statistics only when dimensions match.
-        if (hasattr(self, "generator_clip_action_limit_low") and 
-            hasattr(self, "generator_clip_action_limit_high")):
-            if len(command) == len(self.generator_clip_action_limit_low):
-                command = np.clip(
-                    command,
-                    self.generator_clip_action_limit_low,
-                    self.generator_clip_action_limit_high,
-                )
-            else:
-                logger.debug(
-                    "Skipping generator stat clipping due to dim mismatch: "
-                    f"command={len(command)}, stats={len(self.generator_clip_action_limit_low)}"
-                )
+
+        command = command * self.generator_action_scale + self.generator_default_actions
+        command = np.clip(
+            command,
+            self.generator_clip_action_limit_low,
+            self.generator_clip_action_limit_high,
+        )
 
         return command.astype(np.float32)
 
