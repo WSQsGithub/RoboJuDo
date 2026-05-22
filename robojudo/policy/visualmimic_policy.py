@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class HistoryHandler:
-    def __init__(self, num_envs, history_config, obs_dims, device, reversed=False):
+    def __init__(self, history_config, obs_dims, device, reversed=False, num_envs=1):
         self.obs_dims = obs_dims
         self.device = device
         self.num_envs = num_envs
@@ -132,17 +132,21 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
         self.ankle_idx = self.cfg_policy.ankle_idx
 
-        history_config: dict[str, dict[str, int]] = {}
-        cfg_obs_aux = self.obs_auxiliary
-        if isinstance(cfg_obs_aux, dict):
-            for aux_key, aux_cfg in cfg_obs_aux.items():
-                if isinstance(aux_cfg, dict):
-                    history_config[aux_key] = dict(aux_cfg)
-        if self.short_history_config:
-            history_config.setdefault("short_history", dict(self.short_history_config))
-        if self.long_history_config:
-            history_config.setdefault("long_history", dict(self.long_history_config))
+        _ = self.obs_auxiliary.pop("history")
+    
+
         
+            device=torch.device(self.device),
+            reversed=True
+        )
+        
+        self._depth_window_name = "VisualMimic Depth"
+        self._depth_vis_warned = False
+        self._depth_save_warned = False
+        self._depth_vis_available = cv2 is not None
+        self._warned_get_action_without_obs = False
+
+        self.reset()
         self.history_handler = HistoryHandler(
             num_envs=1,
             history_config=history_config,
@@ -417,21 +421,60 @@ class VisualmimicPolicy(HumanoidVersePolicy):
     def _get_obs_ee_ang_vel_rel(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("ee_ang_vel_rel", 0), dtype=np.float32)
     def _get_obs_hand_contact_force(self, env_data, ctrl_data=None): return np.zeros(self.obs_dims.get("hand_contact_force", 0), dtype=np.float32)
     def _get_obs_ego_cam(self, env_data, ctrl_data=None):
-        return self._build_actor_obs_2d(env_data).flatten()
+        """Build actor_obs_2d: Visual observation for CNN head.
+        
+        Shape: [1, H, W] (single-channel depth image)
+        near = float(self.config.robot.camera.near_plane)
+        far = float(self.config.robot.camera.far_plane)
 
-    def _compose_aux_history(self, aux_name: str) -> np.ndarray:
-        aux_cfg = None
-        cfg_obs_aux = self.obs_auxiliary
-        if isinstance(cfg_obs_aux, dict):
-            aux_cfg = cfg_obs_aux.get(aux_name)
+        depth = np.nan_to_num(depth, nan=far, posinf=far, neginf=near)
+        depth = np.clip(depth, near, far)
 
-        if not isinstance(aux_cfg, dict):
-            if aux_name == "short_history":
-                aux_cfg = self.short_history_config
-            elif aux_name == "long_history":
-                aux_cfg = self.long_history_config
-            else:
-                aux_cfg = {}
+        depth = (depth - near) / (far - near)
+
+        vis_depth = depth.copy()
+        self.visualize_depth_map(vis_depth)
+        
+        return np.expand_dims(depth.astype(np.float32), axis=0) - 0.5
+
+
+
+    def _get_history(self, history_config, concat_method='default'):
+        history_key_list = history_config.keys()
+        history_tensors = []
+        history_length = list(history_config.values())[0]
+        if concat_method == 'default':
+            for key in history_key_list:
+                history_length = history_config[key]
+                history_tensor = self.history_handler.query(key)[:, :history_length]
+                history_tensor = history_tensor.reshape(history_tensor.shape[0], -1)  # Shape: [num_env, history_length*obs_dim]
+                history_tensors.append(history_tensor)
+            return torch.cat(history_tensors, dim=1).squeeze()
+        elif concat_method == 'frame_wise':
+            for frame in range(history_length):
+                frame_components = []
+                for key in history_key_list:
+                    frame_obs = self.history_handler.query(key)[:, frame]
+                    frame_obs = frame_obs.reshape(frame_obs.shape[0], -1)
+                    frame_components.append(frame_obs)
+                frame_tensor = torch.cat(frame_components, dim=1)  # Shape: [num_env, obs_dim]
+                history_tensors.append(frame_tensor)
+            return torch.cat(history_tensors, dim=1).squeeze()  # Shape: [, history_length*obs_dim]
+        else:
+            raise ValueError(f"Unknown history_concat_method: {concat_method}")
+    
+    def _get_obs_long_history(self, env_data=None, ctrl_data=None):
+        assert "long_history" in self.config.obs.obs_auxiliary.keys()
+        history_config = self.config.obs.obs_auxiliary['long_history']
+        return self._get_history(history_config)
+    
+        Priority: use env_data.camera_depth (MuJoCo), fallback to zeros.
+        
+        Returns:
+            Visual observation array (1xHxW), normalized to [0, 1]
+        """
+        width = self.config.robot.camera.width
+        height = self.config.robot.camera.height
 
         parts: list[np.ndarray] = []
         for obs_key, repeat in aux_cfg.items():
@@ -447,14 +490,25 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(parts, dtype=np.float32)
 
-    def _get_obs_history(self, env_data=None, ctrl_data=None):
-        return self._compose_aux_history("history")
+        if depth is None:
+            return np.zeros((1, height, width), dtype=np.float32)
 
-    def _get_obs_long_history(self, env_data=None, ctrl_data=None):
-        return self._compose_aux_history("long_history")
+        depth = np.asarray(depth, dtype=np.float32)
+        if depth.ndim != 2 or depth.size == 0:
+            logger.debug("Invalid camera_depth shape: %s", getattr(depth, "shape", None))
+            return np.zeros((1, height, width), dtype=np.float32)
+
+        # Resize by nearest-neighbor sampling to match generator input shape.
+        src_h, src_w = depth.shape
+        if (src_h, src_w) != (height, width):
+            y_idx = np.linspace(0, src_h - 1, height).astype(np.int32)
+            x_idx = np.linspace(0, src_w - 1, width).astype(np.int32)
+            depth = depth[y_idx][:, x_idx]
 
     def _get_obs_short_history(self, env_data=None, ctrl_data=None):
-        return self._compose_aux_history("short_history")
+        assert "short_history" in self.config.obs.obs_auxiliary.keys()
+        history_config = self.config.obs.obs_auxiliary['short_history']
+        return self._get_history(history_config)
 
     def _get_obs_tracker_proprio(self, env_data, ctrl_data=None) -> np.ndarray:
         """Build tracker_proprio (74D) with sub-component scaling applied internally.
