@@ -210,18 +210,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
                 total += self.obs_dims.get(key, 0)
         return total
     
-            reversed=False
-        )
-
-        self._depth_window_name = "VisualMimic Depth"
-        self._depth_vis_warned = False
-        self._depth_save_warned = False
-        self._depth_vis_available = cv2 is not None
-        self._has_fresh_action = False
-        self._warned_get_action_without_obs = False
-
-        self.reset()
-
     def _load_tracker_model(self):
         """Load the tracker model (TorchScript)."""
         tracker_file = Path(self.cfg_policy.tracker_model_file).expanduser()
@@ -301,7 +289,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self.timestep = 0
         self.last_action = np.zeros(self.num_actions, dtype=np.float32)
         self._stashed_action = np.zeros(self.num_actions, dtype=np.float32)
-        self._has_fresh_action = False
         
         # Reset the history handler for "envs" 0
         reset_ids = torch.tensor([0], device=self.device, dtype=torch.long)
@@ -348,8 +335,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
     def _get_obs_base_lin_vel(self, env_data, ctrl_data):
         """Get base linear velocity observation."""
-        if env_data.base_lin_vel is None:
-            return np.zeros(3, dtype=np.float32)
         return env_data.base_lin_vel
 
     def _get_obs_base_ang_vel(self, env_data, ctrl_data):
@@ -624,7 +609,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         action = self._post_process_tracker_action(tracker_action)
         self._stashed_action = action.copy()
         self.last_action = action.copy()
-        self._has_fresh_action = True
 
         dummy_obs = np.zeros(1, dtype=np.float32)
         extras = {
@@ -694,17 +678,15 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         For VisualMimic, the action is already computed in get_observation,
         so this just returns the cached action.
         """
-        if self._has_fresh_action:
-            self._has_fresh_action = False
-            return self._stashed_action.copy()
-
         if not self._warned_get_action_without_obs:
             logger.warning(
                 "get_action called before fresh get_observation; returning last_action."
             )
             self._warned_get_action_without_obs = True
 
-        return self.last_action.copy()
+        return self.action_scale * self._stashed_action.copy()
+        
+
 
     def visualize_depth_map(self, depth_map: np.ndarray):
         """Visualize the depth map with OpenCV and refresh every step.
@@ -722,8 +704,8 @@ class VisualmimicPolicy(HumanoidVersePolicy):
                 self._depth_vis_warned = True
             return
 
-        depth_map_2d = np.clip(depth_map[0], 0.0, 1.0)
-        depth_u8 = (depth_map_2d * 255.0).astype(np.uint8)
+        depth_map_2d = depth_map
+        depth_u8 = (depth_map_2d * 255.0).clip(0, 255).astype(np.uint8)
         depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)
 
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
