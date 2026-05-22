@@ -112,6 +112,42 @@ class G1_29DoF(DoFConfig):
         ],
     ]
 
+class G1_23DoF_FixedHand(G1_29DoF):
+    # num_dofs as 23
+    _subset: bool = True  # if True, simplely inheritance & pick
+
+    _subset_joint_names: list[str] | None = [
+        *[
+            "left_hip_pitch_joint",
+            "left_hip_roll_joint",
+            "left_hip_yaw_joint",
+            "left_knee_joint",
+            "left_ankle_pitch_joint",
+            "left_ankle_roll_joint",
+        ],
+        *[
+            "right_hip_pitch_joint",
+            "right_hip_roll_joint",
+            "right_hip_yaw_joint",
+            "right_knee_joint",
+            "right_ankle_pitch_joint",
+            "right_ankle_roll_joint",
+        ],
+        *["waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"],
+        *[
+            "left_shoulder_pitch_joint",
+            "left_shoulder_roll_joint",
+            "left_shoulder_yaw_joint",
+            "left_elbow_joint",
+        ],
+        *[
+            "right_shoulder_pitch_joint",
+            "right_shoulder_roll_joint",
+            "right_shoulder_yaw_joint",
+            "right_elbow_joint",
+        ],
+    ]
+
 
 class G1_23DoF(G1_29DoF):
     # num_dofs as 23
@@ -180,6 +216,20 @@ class G1EnvCfg(EnvCfg):
     xml: str = (ASSETS_DIR / "robots/g1/g1_29dof_rev_1_0.xml").as_posix()
 
     dof: DoFConfig = G1_29DoF()
+
+    forward_kinematic: ForwardKinematicCfg | None = ForwardKinematicCfg(
+        xml_path=xml,
+        debug_viz=False,
+        kinematic_joint_names=dof.joint_names,
+    )
+    update_with_fk: bool = True
+    torso_name: str = "torso_link"
+
+
+class G1_23EnvFixedHandCfg(EnvCfg):
+    xml: str = (ASSETS_DIR / "robots/g1/g1_23dof_fixed_hand.xml").as_posix()
+
+    dof: DoFConfig = G1_23DoF_FixedHand()
 
     forward_kinematic: ForwardKinematicCfg | None = ForwardKinematicCfg(
         xml_path=xml,
