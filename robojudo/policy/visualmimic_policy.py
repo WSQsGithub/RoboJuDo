@@ -115,27 +115,27 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         
         self._init_generator_config()
 
-        # Load generator model (ONNX)
         self._load_generator_model()
 
         # Load tracker model (Torch JIT)
         self._load_tracker_model()
 
         # Initialize generator action configuration
-        self.action_scale = self.config.robot.control.action_scale
-        self._init_generator_config()
 
+        self.action_scale = self.config.robot.control.action_scale
         self._cached_commands = np.zeros(3, dtype=np.float32)
         # _cached_generator_command holds the most recent generator output;
         # initialised to default_generator_actions so actor_obs has a sensible value on step 0.
         self._cached_generator_command = np.array(self.generator_default_actions, dtype=np.float32)
 
-        self.ankle_idx = self.cfg_policy.ankle_idx
 
         _ = self.obs_auxiliary.pop("history")
     
 
         
+        self.history_handler = HistoryHandler(
+            history_config=self.obs_auxiliary,
+            obs_dims=self.obs_dims,
             device=torch.device(self.device),
             reversed=True
         )
@@ -147,15 +147,11 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         self._warned_get_action_without_obs = False
 
         self.reset()
-        self.history_handler = HistoryHandler(
-            num_envs=1,
-            history_config=history_config,
-            obs_dims=self.obs_dims,
     def _load_train_config(self) -> DictConfig:
             cfg_file = getattr(self.cfg_policy, "train_config_file", None)
             if not cfg_file:
                 return OmegaConf.create({})
-            device=torch.device(self.device),
+
             cfg_path = Path(cfg_file).expanduser()
             if not cfg_path.exists():
                 logger.warning("Train config file not found: %s", cfg_path)
@@ -258,9 +254,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
     def _init_generator_config(self):
         """Initialize generator action normalization."""
-        if self.cfg_policy.generator_action_mean and self.cfg_policy.generator_action_std:
-            gen_mean = np.array(self.cfg_policy.generator_action_mean, dtype=np.float32)
-            gen_std = np.array(self.cfg_policy.generator_action_std, dtype=np.float32)
 
         self.generator_default_actions = np.array(self.config.robot.control.generator.default_actions, dtype=np.float32)
 
@@ -278,11 +271,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             f"{self.generator_clip_action_limit_high[0]:.3f}]"
         )
 
-            logger.debug(f"Generator action limits: [{self.generator_clip_action_limit_low[0]:.3f}, "
-                        f"{self.generator_clip_action_limit_high[0]:.3f}]")
-        else:
-            self.generator_action_mean = np.zeros(self.cfg_policy.n_mimic_obs, dtype=np.float32)
-            self.generator_action_std = np.ones(self.cfg_policy.n_mimic_obs, dtype=np.float32)
 
     def reset(self):
         """Reset policy state."""
@@ -300,36 +288,36 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
     def _get_commands(self, ctrl_data) -> np.ndarray:
         """Extract commands from control data."""
-        commands = np.zeros(3, dtype=np.float32)
-        for key in ctrl_data.keys():
-            if key in ["JoystickCtrl", "UnitreeCtrl"]:
-                axes = ctrl_data[key]["axes"]
-                lx, ly, rx = axes["LeftX"], axes["LeftY"], axes["RightX"]
-                commands[0] = command_remap(ly, self.commands_map[0])
-                commands[1] = command_remap(lx, self.commands_map[1])
-                commands[2] = command_remap(rx, self.commands_map[2])
-                return commands
+        commands = np.zeros(4, dtype=np.float32)
+        # for key in ctrl_data.keys():
+        #     if key in ["JoystickCtrl", "UnitreeCtrl"]:
+        #         axes = ctrl_data[key]["axes"]
+        #         lx, ly, rx = axes["LeftX"], axes["LeftY"], axes["RightX"]
+        #         commands[0] = command_remap(ly, self.commands_map[0])
+        #         commands[1] = command_remap(lx, self.commands_map[1])
+        #         commands[2] = command_remap(rx, self.commands_map[2])
+        #         return commands
 
-            if key == "KeyboardCtrl":
-                keys = ctrl_data[key]["keyboard_event"]
-                for event in keys:
-                    if event["type"] != "keyboard":
-                        continue
-                    value = event["pressed"] * 1.5
-                    match event["name"]:
-                        case "w":
-                            commands[0] = command_remap(value, self.commands_map[0])
-                        case "s":
-                            commands[0] = command_remap(-value, self.commands_map[0])
-                        case "a":
-                            commands[1] = command_remap(-value, self.commands_map[1])
-                        case "d":
-                            commands[1] = command_remap(value, self.commands_map[1])
-                        case "e":
-                            commands[2] = command_remap(value, self.commands_map[2])
-                        case "q":
-                            commands[2] = command_remap(-value, self.commands_map[2])
-                return commands
+        #     if key == "KeyboardCtrl":
+        #         keys = ctrl_data[key]["keyboard_event"]
+        #         for event in keys:
+        #             if event["type"] != "keyboard":
+        #                 continue
+        #             value = event["pressed"] * 1.5
+        #             match event["name"]:
+        #                 case "w":
+        #                     commands[0] = command_remap(value, self.commands_map[0])
+        #                 case "s":
+        #                     commands[0] = command_remap(-value, self.commands_map[0])
+        #                 case "a":
+        #                     commands[1] = command_remap(-value, self.commands_map[1])
+        #                 case "d":
+        #                     commands[1] = command_remap(value, self.commands_map[1])
+        #                 case "e":
+        #                     commands[2] = command_remap(value, self.commands_map[2])
+        #                 case "q":
+        #                     commands[2] = command_remap(-value, self.commands_map[2])
+        #         return commands
 
         return commands
 
@@ -379,36 +367,9 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
     def _get_obs_commands(self, env_data, ctrl_data):
         """Alias: training key 'commands' maps to _get_obs_command."""
-        return self._get_obs_command(env_data, ctrl_data)
+        return np.array([1, 0.3, 0, 1.0])
 
     def _get_obs_actions(self, env_data, ctrl_data=None):
-        Priority: use env_data.camera_depth (MuJoCo), fallback to zeros.
-        
-        Returns:
-            Visual observation array (1xHxW), normalized to [0, 1]
-        """
-        width = self.config.robot.camera.width
-        height = self.config.robot.camera.height
-
-        depth = env_data.camera_depth.copy()
-
-        
-
-        if depth is None:
-            return np.zeros((1, height, width), dtype=np.float32)
-
-        depth = np.asarray(depth, dtype=np.float32)
-        if depth.ndim != 2 or depth.size == 0:
-            logger.debug("Invalid camera_depth shape: %s", getattr(depth, "shape", None))
-            return np.zeros((1, height, width), dtype=np.float32)
-
-        # Resize by nearest-neighbor sampling to match generator input shape.
-        src_h, src_w = depth.shape
-        if (src_h, src_w) != (height, width):
-            y_idx = np.linspace(0, src_h - 1, height).astype(np.int32)
-            x_idx = np.linspace(0, src_w - 1, width).astype(np.int32)
-            depth = depth[y_idx][:, x_idx]
-
         """Alias: training key 'actions' maps to last_action (raw, unscaled)."""
         return self.last_action
 
@@ -436,6 +397,33 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         """Build actor_obs_2d: Visual observation for CNN head.
         
         Shape: [1, H, W] (single-channel depth image)
+        Priority: use env_data.camera_depth (MuJoCo), fallback to zeros.
+        
+        Returns:
+            Visual observation array (1xHxW), normalized to [0, 1]
+        """
+        width = self.config.robot.camera.width
+        height = self.config.robot.camera.height
+
+        depth = env_data.camera_depth.copy()
+
+        
+
+        if depth is None:
+            return np.zeros((1, height, width), dtype=np.float32)
+
+        depth = np.asarray(depth, dtype=np.float32)
+        if depth.ndim != 2 or depth.size == 0:
+            logger.debug("Invalid camera_depth shape: %s", getattr(depth, "shape", None))
+            return np.zeros((1, height, width), dtype=np.float32)
+
+        # Resize by nearest-neighbor sampling to match generator input shape.
+        src_h, src_w = depth.shape
+        if (src_h, src_w) != (height, width):
+            y_idx = np.linspace(0, src_h - 1, height).astype(np.int32)
+            x_idx = np.linspace(0, src_w - 1, width).astype(np.int32)
+            depth = depth[y_idx][:, x_idx]
+
         near = float(self.config.robot.camera.near_plane)
         far = float(self.config.robot.camera.far_plane)
 
@@ -530,47 +518,22 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         obs_buf_dict = {}
         for group_keys in obs_groups.values():
             for key in group_keys:
-                if key not in ["shory_history", "long_history", "history", "short_history"]:
-                    get_fn = getattr(self, f"_get_obs_{key}", None)
-                    if get_fn is not None:
-                        obs = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32)
-                    else:
-                        obs = np.zeros(self.obs_dims.get(key, 0), dtype=np.float32)
-                    # Apply scale
-                    obs_buf_dict[key] = obs * self.obs_scales.get(key, 1.0)
+                get_fn = getattr(self, f"_get_obs_{key}", None)
+                if get_fn is not None:
+                    obs = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32)
+                else:
+                    obs = np.zeros(self.obs_dims.get(key, 0), dtype=np.float32)
+                # Apply scale
+                obs_buf_dict[key] = obs * self.obs_scales.get(key, 1.0)
 
-        # For tracker_proprio, it is built from parts:
-        if "tracker_proprio" not in obs_buf_dict:
-            obs_buf_dict["tracker_proprio"] = self._get_obs_tracker_proprio(env_data, ctrl_data)
-        
-        tracker_obs_dim = self._calc_tracker_obs_dim()
-        assert len(tracker_obs) == tracker_obs_dim
-        
         # 2. Push primitive obs to HistoryHandler
         for key in self.history_handler.history.keys():
             if key in obs_buf_dict:
                 val = torch.from_numpy(obs_buf_dict[key]).unsqueeze(0).to(self.device).float()
                 self.history_handler.add(key, val)
-        
-        # 3. Compute history observations
-        for hist_key in ["short_history", "long_history", "history"]:
-            # Check if it is required by obs_dict groups
-            is_needed = any(hist_key in group for group in obs_groups.values())
-            if is_needed:
-                get_fn = getattr(self, f"_get_obs_{hist_key}", None)
-                if get_fn is not None:
-                    obs_buf_dict[hist_key] = np.asarray(get_fn(env_data, ctrl_data), dtype=np.float32) * self.obs_scales.get(hist_key, 1.0)
-        
-        # 4. Construct groups
-        actor_obs_2d = self._build_actor_obs_2d(env_data)  # We will manually fetch ego_cam if it's there
-        if "ego_cam" in obs_groups.get("actor_obs_2d", []):
-            actor_obs_2d = obs_buf_dict["ego_cam"].reshape(1, int(cfg.actor_obs_2d_height), int(cfg.actor_obs_2d_width))
-            actor_obs_2d = np.expand_dims(actor_obs_2d, axis=0) # [1, 1, H, W]
-        else:
-            actor_obs_2d = self._build_actor_obs_2d(env_data)
 
-        actor_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("actor_obs", self.actor_obs_config)], dtype=np.float32)
 
+        actor_obs = np.concatenate([obs_buf_dict[k] for k in self.actor_obs_config], dtype=np.float32)
         # Optional length matching
         actor_obs_dim = self._calc_actor_obs_dim()
         assert len(actor_obs) == actor_obs_dim
@@ -596,7 +559,10 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
         # Now construct tracker_obs
         tracker_obs = np.concatenate([obs_buf_dict[k] for k in obs_groups.get("tracker_obs", self.tracker_obs_config)], dtype=np.float32)
-
+        
+        tracker_obs_dim = self._calc_tracker_obs_dim()
+        assert len(tracker_obs) == tracker_obs_dim
+        
         # Run tracker
         try:
             tracker_input = torch.from_numpy(tracker_obs).unsqueeze(0).float().to(self.device)
@@ -619,10 +585,7 @@ class VisualmimicPolicy(HumanoidVersePolicy):
             "action_raw": action,
         }
 
-        vis_depth = actor_obs_2d
-        if vis_depth.ndim == 4 and vis_depth.shape[0] == 1:
-            vis_depth = vis_depth[0]
-        self.visualize_depth_map(vis_depth)
+        
         return dummy_obs, extras
 
 
@@ -654,21 +617,10 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
     def _post_process_tracker_action(self, action: np.ndarray) -> np.ndarray:
         """Post-process final action from tracker output."""
-        if len(action) != self.num_actions:
-            if len(action) > self.num_actions:
-                action = action[: self.num_actions]
-            else:
-                action = np.pad(action, (0, self.num_actions - len(action)), mode="constant")
-
-        # Apply smoothing factor
-        action = (1 - self.action_beta) * self.last_action + self.action_beta * action
 
         # Apply global action clipping
         if self.action_clip is not None:
             action = np.clip(action, -self.action_clip, self.action_clip)
-
-        # Apply action scale
-        action = action * self.action_scale
 
         return action.astype(np.float32)
 
@@ -694,10 +646,6 @@ class VisualmimicPolicy(HumanoidVersePolicy):
         Args:
             depth_map: Depth map array to visualize (1xHxW), value range [0, 1].
         """
-        if depth_map.ndim != 3 or depth_map.shape[0] != 1:
-            logger.error("Invalid depth map shape for visualization: %s", depth_map.shape)
-            return
-
         if not self._depth_vis_available:
             if not self._depth_vis_warned:
                 logger.warning("OpenCV (cv2) is not installed, skip depth visualization.")
