@@ -440,7 +440,7 @@ class VisualmimicPolicy(HumanoidVersePolicy):
 
 
 
-    def _get_history(self, history_config, concat_method='default'):
+    def _get_history(self, history_config, concat_method='frame_wise'):
         history_key_list = history_config.keys()
         history_tensors = []
         history_length = list(history_config.values())[0]
